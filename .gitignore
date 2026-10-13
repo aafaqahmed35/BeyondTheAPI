@@ -1,0 +1,10 @@
+# macOS
+.DS_Store
+
+# Java Compilation
+*.class
+/bin/
+/tmp/
+
+# Build Output
+/dist/
