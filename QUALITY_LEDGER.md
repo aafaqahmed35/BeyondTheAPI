@@ -20,8 +20,8 @@ This central ledger records the technical quality, code verification, completene
 | **01** | **Data Structures and Algorithms** | `modules/module_01_dsa.md` | 21 / 21 | Verified (11/11 test suites passed in JDK 21) | Passed (`scripts/validate_handbook.py`) | `reviews/module_01_qa.md` | **USER APPROVED** | 2026-10-13 (Explicit User Approval) |
 | **02** | **Operating Systems and Computer Networks** | `modules/module_02_os_networks.md` | 13 / 13 | Verified (5/5 test suites passed in JDK 21 & POSIX) | Passed (`scripts/validate_handbook.py`) | `reviews/module_02_qa.md` | **USER APPROVED** | 2026-10-13 (Explicit User Approval) |
 | **03** | **Java, OOP, and Language Fundamentals** | `modules/module_03_java_oop.md` | 17 / 17 | Verified (9/9 test suites passed in JDK 21) | Passed (`scripts/validate_handbook.py`) | `reviews/module_03_qa.md` | **USER APPROVED** | 2026-10-14 (Explicit User Approval) |
-| **04** | **Database Engineering and SQL** | `modules/module_04_database_engineering.md` | 16 / 16 | Verified (8/8 test suites passed in SQLite3 & Standard SQL) | Passed (`scripts/validate_handbook.py`) | `reviews/module_04_qa.md` | **READY FOR USER REVIEW** | Pending User Review |
-| **05** | Backend Frameworks and Application Architecture | `modules/module_05_backend_arch.md` | TBD | Pending | Pending | Pending | `NOT STARTED` | Pending |
+| **04** | **Database Engineering and SQL** | `modules/module_04_database_engineering.md` | 16 / 16 | Verified (8/8 test suites passed in SQLite3 & Standard SQL) | Passed (`scripts/validate_handbook.py`) | `reviews/module_04_qa.md` | **USER APPROVED** | 2026-10-14 (Explicit User Approval) |
+| **05** | **Backend Frameworks & Application Engineering** | `modules/module_05_backend_frameworks.md` | 16 / 16 | Verified (11/11 test suites passed in JDK 21 & Node v24) | Passed (`scripts/validate_handbook.py`) | `reviews/module_05_qa.md` | **READY FOR USER REVIEW** | Pending User Review |
 | **06** | API Engineering and Security | `modules/module_06_apis_security.md` | TBD | Pending | Pending | Pending | `NOT STARTED` | Pending |
 | **07** | Caching and Data Access Performance | `modules/module_07_caching_redis.md` | TBD | Pending | Pending | Pending | `NOT STARTED` | Pending |
 | **08** | Asynchronous Processing and Distributed Messaging | `modules/module_08_async_messaging.md` | TBD | Pending | Pending | Pending | `NOT STARTED` | Pending |
@@ -162,7 +162,41 @@ This central ledger records the technical quality, code verification, completene
   15. High-Value Database Interview Reasoning: Question Bank and Deep Failure Analysis — *Completed*
   16. Module 4 Cheatsheet: Database Engineering & SQL — *Completed*
 - **Code Verification:** Standalone verification harness in `assets/code_examples/module_04_database_examples.sql` and `scripts/test_module_04_db.py`. All 8 test suites passed.
-- **Current Execution Status:** `READY FOR USER REVIEW`
+- **Current Execution Status:** `USER APPROVED`
+- **Human Approval Date:** 2026-10-14 (Explicit User Approval)
 - **Known Limitations:**
   - Local automated execution utilizes SQLite 3.x embedded engine; PostgreSQL/MySQL engine details verified against official specifications.
-- **External Review Status:** Source Markdown, QA audit report, SQL example file, and test harness ready for dispatch to external reviewers.
+- **External Review Status:** Approved by Human Reviewer.
+
+---
+
+## 7. Module 5 Deep-Dive Status Card
+
+- **Module Identifier:** `MOD-05-BACKEND`
+- **Module Title:** Backend Frameworks & Application Engineering
+- **Authoritative Source File:** [module_05_backend_frameworks.md](file:///Users/mohammedaafaqahmed/Desktop/BeyondTheApi/modules/module_05_backend_frameworks.md)
+- **QA Audit File:** [reviews/module_05_qa.md](file:///Users/mohammedaafaqahmed/Desktop/BeyondTheApi/reviews/module_05_qa.md)
+- **Target Frameworks / Runtimes:** Java 21 LTS, Spring Boot 3.3.x, Spring MVC, Spring Data JPA / Hibernate 6.5.x, Node.js v24.x (v20+ LTS), Express.js 4.x/5.x, TypeScript 5.x
+- **Section Scope (16 Sections):**
+  1. Backend Application Architecture: The Request Lifecycle, Layering, and Abstraction Boundaries — *Completed*
+  2. The Node.js Runtime Model: V8, libuv, the Event Loop, and Asynchronous I/O — *Completed*
+  3. Express.js Request Pipeline: Routing, Middleware Chaining, and Error Handling — *Completed*
+  4. TypeScript for Backend Engineering: Structural Typing, Trust Boundaries, and Type Erasure — *Completed*
+  5. Java Web Application Foundations: Servlets, the DispatcherServlet, and Container Architecture — *Completed*
+  6. Spring Core and Dependency Injection: Inversion of Control, Bean Scopes, and Lifecycle Mechanics — *Completed*
+  7. Spring Boot Application Engineering: Auto-Configuration, Starters, and Externalized Config — *Completed*
+  8. Spring MVC and Validation: Request Mapping, Content Negotiation, and Centralized Advice — *Completed*
+  9. Persistence Integration with JPA and Hibernate: Persistence Context, Dirty Checking, and Entity Lifecycles — *Completed*
+  10. Spring Declarative Transaction Management: Proxies, Self-Invocation Traps, and Rollback Rules — *Completed*
+  11. Node.js Modular Application Architecture: Clean Layering, Async Resources, and Graceful Shutdown — *Completed*
+  12. Testing Backend Applications: Unit vs. Integration Testing, Test Doubles, and Database Boundaries — *Completed*
+  13. Production Observability, Diagnostics, and Debugging: Structured Logging, Health Checks, and Starvation — *Completed*
+  14. Spring Boot vs. Node.js & Express: Comprehensive Architectural Comparison and Selection Guide — *Completed*
+  15. High-Value Backend Interview Reasoning: Question Bank and Deep Failure Analysis — *Completed*
+  16. Module 5 Cheatsheet: Backend Frameworks & Application Engineering — *Completed*
+- **Code Verification:** Standalone verification harnesses in `assets/code_examples/Module05FrameworkExamples.java` (7 test suites, OpenJDK 21 LTS) and `assets/code_examples/module_05_node_examples.js` (4 test suites, Node.js). All 11 test suites passed.
+- **Current Execution Status:** `READY FOR USER REVIEW`
+- **Known Limitations:**
+  - Lightweight test harnesses implement core IoC/proxy and Express router semantics in pure Java 21 and Node.js without heavyweight multi-gigabyte build tools.
+  - Deep API security deferred to Module 6; caching to Module 7; messaging to Module 8; distributed systems to Module 9; system design to Module 10.
+- **External Review Status:** Source Markdown, QA audit report, Java and Node test harnesses ready for dispatch to external reviewers.
