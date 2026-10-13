@@ -178,7 +178,7 @@ function testEventLoopMicrotaskPriority() {
             order.push('PROMISE');
         });
 
-        // Microtask: process.nextTick (runs at start of next tick, before other microtasks!)
+        // Microtask: process.nextTick (drains immediately when synchronous call stack empties, before Promise microtasks and before next macrotask)
         process.nextTick(() => {
             order.push('NEXT_TICK');
         });

@@ -144,7 +144,7 @@ A critical interview topic and production security vulnerability is the direct e
 #### Why Exposing Entities Directly Fails Catastrophically:
 1. **Mass Assignment (Over-Posting Vulnerability):** If an HTTP endpoint binds an incoming JSON payload directly to a `UserEntity`, an attacker can inject `"role": "ADMIN"` or `"isVerified": true` in the JSON body, silently elevating their privileges.
 2. **Data Leakage:** Returning a persistence entity directly serializes internal attributes (e.g., `passwordHash`, `socialSecurityNumber`, `internalAuditLogs`) out over public HTTP responses.
-3. **Infinite Recursion:** Bidirectional JPA relationships (`@OneToMany` and `@ManyToOne`) cause Jackson or V8 JSON serializers to loop infinitely until a `StackOverflowError` or memory crash occurs.
+3. **Circular Reference Serialization Failures:** Bidirectional JPA relationships (`@OneToMany` and `@ManyToOne`) cause Jackson (`ObjectMapper`) to recurse indefinitely until a `JsonMappingException` / `StackOverflowError` occurs, while in Node.js/V8, native `JSON.stringify()` detects the cycle and immediately throws a `TypeError: Converting circular structure to JSON`.
 4. **Schema Coupling:** Any alteration to the internal database schema immediately breaks existing client API contracts.
 
 #### The Architectural Solution:
@@ -221,18 +221,21 @@ The Node.js event loop executes in a continuous loop through six distinct phases
 
 ### 2.3 Microtask Queues: `process.nextTick` vs. `Promise.then`
 
-In addition to the six event loop phases, Node.js manages two high-priority **microtask queues** that execute immediately whenever the JavaScript call stack empties:
+In addition to the six event loop phases, Node.js manages two high-priority **microtask queues** that execute whenever the JavaScript call stack becomes empty:
 
-1. **`process.nextTick` Queue:** Highest priority. Executes immediately after the current synchronous operation finishes, before *any* other microtasks or event loop phases.
-2. **Promise Jobs Queue:** Executes microtasks scheduled by `Promise.resolve().then(...)` and `queueMicrotask()`. Executes immediately after the `nextTick` queue empties.
+1. **`process.nextTick` Queue:** Managed by Node.js itself (`nextTickQueue`). When the current synchronous JavaScript execution stack empties, Node.js immediately drains the entire `nextTickQueue` (including any additional `process.nextTick` callbacks scheduled while draining).
+2. **Promise Microtask Queue:** Managed by the V8 engine (Promise reactions scheduled via `Promise.resolve().then(...)` and `queueMicrotask()`). Runs immediately after the `process.nextTick` queue has been completely exhausted.
 
 ```
-Execution Priority Order:
-[ Synchronous Call Stack ] -> [ process.nextTick Queue ] -> [ Promise Microtask Queue ] -> [ Event Loop Phase ]
+Microtask Execution Priority Order:
+[ Synchronous Call Stack ] -> [ process.nextTick Queue ] -> [ V8 Promise Microtask Queue ] -> [ Next Macrotask / Callback ]
 ```
+
+> [!NOTE]
+> **Node.js Version History on Microtask Execution:** Prior to **Node.js 11.0.0**, microtasks were drained primarily *between phases* of the event loop. Since Node.js 11.0.0, Node.js conforms to the standard ECMAScript and HTML5 browser specification: **microtasks are drained immediately after each individual macrotask callback** (e.g., between individual `setTimeout` timers or I/O callbacks), rather than waiting for an entire phase queue to finish.
 
 #### Event Loop Starvation via Recursive `process.nextTick`
-Because the `nextTick` queue drains completely before the event loop advances to the next phase, recursive invocations of `process.nextTick()` completely starve I/O:
+Because the `nextTick` queue drains completely before the event loop advances or executes Promise microtasks, recursive invocations of `process.nextTick()` completely starve I/O and timers:
 ```javascript
 // DANGEROUS: Starves the event loop completely!
 function starve() {
@@ -248,19 +251,24 @@ starve();
 A widespread interview misconception is that *every* asynchronous operation in Node.js uses background threads.
 
 ```
-+--------------------------------------------------------------------------+
-| HOW NODE.JS EXECUTES ASYNCHRONOUS OPERATIONS                             |
-+------------------------------------+-------------------------------------+
-| Network Sockets (Non-Blocking OS)  | File System, DNS, Crypto (Threads)  |
-+------------------------------------+-------------------------------------+
-| - HTTP requests, TCP sockets       | - fs.readFile, fs.writeFile         |
-| - Handled by OS Kernel Multiplexer | - crypto.pbkdf2, crypto.randomBytes |
-|   (Linux epoll, macOS kqueue)      | - dns.lookup                        |
-| - ZERO THREADS ALLOCATED!          | - Allocated to libuv Thread Pool    |
-| - Scales to 100,000+ idle sockets  | - Default size: 4 threads           |
-|                                    |   (Configured via UV_THREADPOOL_SIZE)|
-+------------------------------------+-------------------------------------+
++-----------------------------------------------------------------------------------+
+| HOW NODE.JS EXECUTES ASYNCHRONOUS OPERATIONS                                      |
++----------------------------------------+------------------------------------------+
+| Non-Blocking OS Kernel Multiplexing    | Internal libuv Worker Thread Pool        |
+| (0 Threads Allocated)                  | (Default: 4 Threads, UV_THREADPOOL_SIZE) |
++----------------------------------------+------------------------------------------+
+| - Network Sockets (TCP, UDP, TLS)      | - File System I/O (fs.readFile, etc.)     |
+| - HTTP/HTTPS server and client calls   | - Blocking DNS resolution: dns.lookup()  |
+| - Non-blocking DNS: dns.resolve*()     |   (Uses synchronous POSIX getaddrinfo)   |
+|   (Implemented via c-ares library)     | - Asynchronous Crypto (pbkdf2, scrypt,   |
+| - Handled by Linux epoll, macOS kqueue |   randomBytes, generateKeyPair)          |
+| - Scales to 100,000+ idle connections  | - Asynchronous Compression (zlib.*)      |
++----------------------------------------+------------------------------------------+
 ```
+
+#### The DNS Interview Trap: `dns.lookup` vs. `dns.resolve`
+- **`dns.lookup(hostname, callback)`:** Delegates to the operating system's native `getaddrinfo(3)` C-library call. Because `getaddrinfo(3)` is synchronous and blocking in POSIX, Node.js executes it on a **libuv worker thread**. If an application initiates 5 concurrent `dns.lookup` calls under the default `UV_THREADPOOL_SIZE=4`, the 5th call stalls waiting for an available thread!
+- **`dns.resolve(hostname, callback)` (and `dns.resolve4`, `dns.resolve6`):** Implemented via the third-party **c-ares** library. Performs DNS name resolution directly over asynchronous, non-blocking UDP/TCP sockets managed by the event loop, consuming **zero libuv worker threads**.
 
 ---
 
@@ -563,9 +571,19 @@ In the traditional Java enterprise architecture, web applications run inside a *
 +--------------------------------------------------------------------------+
 ```
 
-- Each incoming connection is assigned a dedicated OS thread from the container's thread pool.
-- The thread executes the entire pipeline synchronously from filter down to database query and back to response.
-- **Resource Boundary:** If 200 concurrent requests block waiting on a slow database query, all 200 threads are exhausted, and Tomcat begins queuing or rejecting new TCP connections.
+- **Traditional Thread-Per-Request Model:** Each incoming TCP connection is assigned a dedicated OS platform thread from the container's worker thread pool (Tomcat default `server.tomcat.threads.max=200`). The thread executes the entire pipeline synchronously from filter down to database query and back to response.
+- **Resource Boundary:** If 200 concurrent requests block waiting on a slow database query or remote API call, all 200 platform threads are exhausted, and Tomcat begins queuing (`accept-count`) or dropping new connections.
+
+#### Architectural Evolutions of the Servlet Concurrency Model:
+1. **Servlet 3.0+ Asynchronous Request Processing (`AsyncContext`):**
+   - Allows a controller to unbind and return the container thread to the pool while long-running I/O or background processing occurs.
+   - In Spring MVC, this is surfaced via return types like `DeferredResult<T>`, `Callable<T>`, and `CompletableFuture<T>`. When the asynchronous result completes on a separate worker thread pool, the container writes the response or redispatches the request.
+2. **Modern Java 21 & Spring Boot 3.2+ Virtual Threads (Project Loom):**
+   - Enabled via `spring.threads.virtual.enabled=true`.
+   - The container continues to use the intuitive, synchronous thread-per-request programming model, but assigns each request to a lightweight **Virtual Thread** rather than an expensive OS platform thread.
+   - When a virtual thread executes a blocking operation (e.g., standard blocking JDBC call via HikariCP, socket read), the JVM **unmounts** the virtual thread from its underlying OS carrier thread. The carrier thread immediately executes other virtual threads. Once I/O completes, the virtual thread is remounted, allowing tens of thousands of concurrent blocked requests without pool exhaustion!
+3. **Reactive Non-Blocking Alternative (Spring WebFlux):**
+   - Replaces the Servlet thread-per-request paradigm entirely with an asynchronous, event-driven event-loop runtime (typically Project Reactor on Eclipse Netty), utilizing small fixed-size event loops (typically 1 thread per CPU core) communicating via reactive streams.
 
 ---
 
@@ -671,17 +689,18 @@ Spring provides specialized component stereotypes that inherit from `@Component`
 | **`request`** | One instance per HTTP request lifecycle. Destroyed when request completes. | Request-scoped audit context, tenant token. |
 | **`session`** | One instance per HTTP session. | User shopping cart, user session state. |
 
-**Thread-Safety Invariant:** Because default Spring beans are singletons shared across hundreds of concurrent request threads, **Spring singleton beans must be strictly stateless**. Never store request-specific mutable state in instance fields of a `@Service` or `@RestController`!
+**Thread-Safety Invariant:** Because default Spring beans are singletons shared across concurrent request threads, **they must be thread-safe**. While storing request-scoped mutable state (e.g., saving a `currentUser` or `currentOrderId` in an instance field of a `@Service` or `@RestController`) causes severe concurrency race conditions and cross-request data corruption, singleton beans may safely hold thread-safe state: read-only `final` configuration properties, thread-safe concurrent caches (`ConcurrentHashMap`, Caffeine), atomic metrics counters (`AtomicLong`, `LongAdder`), or thread-safe resource pools.
 
 ---
 
 ### 6.4 The Spring Bean Lifecycle
 
 ```
-1. Instantiation (Constructor invoked)
+1. Instantiation (Constructor invoked via reflection)
          |
          v
-2. Populate Properties (Dependencies injected)
+2. Populate Properties (Dependencies injected into fields/setters)
+   [*Note: In circular references, Early Bean References / Proxies can be created here!]
          |
          v
 3. BeanNameAware / BeanFactoryAware / ApplicationContextAware callbacks
@@ -693,7 +712,7 @@ Spring provides specialized component stereotypes that inherit from `@Component`
 5. @PostConstruct / InitializingBean.afterPropertiesSet()
          |
          v
-6. BeanPostProcessor.postProcessAfterInitialization() -> [AOP Proxies Created Here!]
+6. BeanPostProcessor.postProcessAfterInitialization() -> [Standard AOP Proxies Created Here!]
          |
          v
    [ Bean Ready for Use in Application ]
@@ -701,6 +720,11 @@ Spring provides specialized component stereotypes that inherit from `@Component`
          v
 7. @PreDestroy / DisposableBean.destroy() (During ApplicationContext shutdown)
 ```
+
+#### Detailed Proxy Creation Mechanics:
+- **Standard AOP Proxy Creation:** In normal bean lifecycle execution, Spring AOP proxies (for `@Transactional`, `@Async`, `@Secured`, custom aspects) are created in `BeanPostProcessor.postProcessAfterInitialization()` by an `AbstractAutoProxyCreator` (such as `AnnotationAwareAspectJAutoProxyCreator`). The target bean is fully initialized before the proxy wraps it.
+- **Early Proxy Creation in Circular Dependencies:** When a circular dependency is detected and resolved (e.g., via setter injection), Spring invokes `SmartInstantiationAwareBeanPostProcessor.getEarlyBeanReference()`. This generates the proxy *early*—before property population and initialization of the collaborator bean—and places it into the 3rd-level singleton factory cache (`singletonFactories`). When `postProcessAfterInitialization()` is reached later, Spring recognizes that the early proxy was already exposed and avoids duplicate proxy wrapping.
+- **Proxy Implementation Defaults:** In Spring Boot 2.x and 3.x, CGLIB class-based proxies are used by default (`spring.aop.proxy-target-class=true`). In raw Spring Framework without Spring Boot, JDK dynamic interface proxies are used whenever the target class implements at least one interface.
 
 ---
 
@@ -728,29 +752,51 @@ Auto-configuration is not magic. It operates on conditional evaluation:
 
 ```java
 // Example from Spring Boot's internal DataSourceAutoConfiguration:
-@Configuration
+@AutoConfiguration(before = SqlInitializationAutoConfiguration.class)
 @ConditionalOnClass({ DataSource.class, EmbeddedDatabaseType.class })
 @ConditionalOnMissingBean(type = "javax.sql.DataSource")
+@EnableConfigurationProperties(DataSourceProperties.class)
 public class DataSourceAutoConfiguration {
     @Bean
-    public DataSource dataSource() {
-        return new HikariDataSource(); // Configures default Hikari pool!
+    @ConditionalOnMissingBean
+    public DataSource dataSource(DataSourceProperties properties) {
+        return properties.initializeDataSourceBuilder().type(HikariDataSource.class).build();
     }
 }
 ```
 
+> [!NOTE]
+> **The `javax` vs. `jakarta` Namespace Distinction in Spring Boot 3.x:**
+> When upgrading to Spring Boot 3.x and Jakarta EE 10, Java EE APIs migrated packages from `javax.*` to `jakarta.*` (e.g., `jakarta.servlet.Filter`, `jakarta.persistence.Entity`, `jakarta.validation.Valid`, `jakarta.annotation.PostConstruct`).
+> **However, `javax.sql.DataSource` did NOT change to `jakarta`!**
+> `javax.sql.DataSource`, `java.sql.Connection`, and `java.sql.PreparedStatement` are core components of **Java SE** (the standard `java.sql` module within OpenJDK), not Java EE. Standard JDBC types permanently retain their `javax.sql` and `java.sql` package identifiers.
+
 ---
 
-### 7.3 Externalized Configuration Precedence
+### 7.3 Externalized Configuration Precedence in Spring Boot 3.x
 
-Spring Boot resolves configuration properties in a strictly ordered hierarchy (from highest to lowest priority):
-1. Devtools global settings
-2. `@TestPropertySource` on test classes
-3. **Command line arguments** (`--server.port=9090`)
-4. **OS Environment variables** (`SERVER_PORT=9090`)
-5. Profile-specific configuration files outside the jar (`config/application-prod.properties`)
-6. Profile-specific configuration files inside the jar (`application-prod.properties`)
-7. Default `application.properties` / `application.yml` inside the jar.
+Spring Boot resolves configuration properties using an ordered hierarchy of `PropertySource` loaders. When the same key is defined in multiple sources, higher-precedence sources override lower ones.
+
+In Spring Boot 2.4+ and 3.x (managed via the `ConfigDataEnvironmentPostProcessor`), the authoritative precedence order (from highest to lowest priority) is:
+
+1. **Devtools global settings** (`~/.config/spring-boot-devtools.properties` when active).
+2. **`@TestPropertySource` annotations** on integration test classes.
+3. **Command line arguments** (`--server.port=9090`).
+4. **Java System properties** (`System.getProperties()`, e.g., `-Dserver.port=9090`).
+5. **OS Environment variables** (e.g., `SERVER_PORT=9090`).
+6. **`RandomValuePropertySource`** (`random.*` values).
+7. **Profile-specific application properties outside the packaged jar** (`config/application-prod.properties`, `config/application-prod.yml`).
+8. **Profile-specific application properties packaged inside the jar** (`classpath:/config/application-prod.properties`, `classpath:application-prod.properties`).
+9. **Application properties outside the packaged jar** (`config/application.properties`, `config/application.yml`).
+10. **Application properties packaged inside the jar** (`classpath:/config/application.properties`, `classpath:application.properties`).
+11. **`@PropertySource` annotations** on `@Configuration` classes.
+12. **Default properties** specified via `SpringApplication.setDefaultProperties`.
+
+> [!IMPORTANT]
+> **Key Configuration Rules of Thumb:**
+> - **Java System Properties (`-D`) override OS Environment Variables (`export`):** If both are supplied, the `-D` argument wins.
+> - **External files override packaged internal files:** A file in a `config/` sub-directory adjacent to the JAR overrides the embedded `src/main/resources/application.properties` inside the JAR.
+> - **Profile-specific files override non-profile files:** `application-prod.properties` overrides `application.properties`.
 
 ---
 
@@ -834,20 +880,20 @@ public class GlobalExceptionHandler {
 
 ---
 
-### 9.2 The Four Entity Lifecycle States
+### 9.2 The Four Entity Lifecycle States and Method Contracts
 
 ```
                 +-----------------+
-                |    TRANSIENT    | (Created with 'new', no DB identity, not in context)
+                |    TRANSIENT    | (Created via 'new', no DB identity, not in context)
                 +-----------------+
                          |
-                         | persist() / find()
+                         | persist() (Or find() loads DB record directly as MANAGED)
                          v
                 +-----------------+
        +------> |     MANAGED     | <------+ (Inside Persistence Context, tracked by dirty checking)
        |        +-----------------+        |
        |                 |                 |
-       | detach()        | remove()        | merge()
+       | detach()/clear()| remove()        | merge() [Returns NEW managed reference!]
        |                 v                 |
 +---------------+  +--------------+        |
 |   DETACHED    |  |   REMOVED    |        |
@@ -856,14 +902,43 @@ public class GlobalExceptionHandler {
        +-----------------+-----------------+
 ```
 
+#### Detailed JPA Method Semantics and Traps:
+1. **`persist(entity)`:**
+   - Transitions a `TRANSIENT` instance to `MANAGED`.
+   - Queues an SQL `INSERT` to be emitted at `flush()` time.
+   - **Identity Generation Exception:** If the entity uses `@GeneratedValue(strategy = GenerationType.IDENTITY)`, Hibernate must immediately execute the SQL `INSERT` statement during the `persist()` call to obtain the database-generated primary key from the engine!
+   - **Detach Trap:** Calling `persist()` on an already `DETACHED` entity throws a `PersistenceException` (or `EntityExistsException`).
+2. **`find(Class<T>, Object id)`:**
+   - Searches the persistence context 1st-level cache (identity map) first.
+   - On cache miss, issues a SQL `SELECT` against the database and registers the loaded entity as `MANAGED`.
+3. **`merge(entity)` (The Return-Value Trap):**
+   - Designed to sync state from a `DETACHED` (or transient) object into the active persistence context.
+   - **The Critical Interview Gotcha:** `em.merge(detachedEntity)` copies the field values of `detachedEntity` onto a managed entity instance (loading it from the DB or 1st-level cache if necessary) and **returns that managed instance**.
+   - **The Passed-in Entity Remains Detached!**
+     ```java
+     // FATAL BUG:
+     em.merge(user);
+     user.setEmail("new@example.com"); // MUTATES DETACHED OBJECT! Lost! Not saved!
+
+     // CORRECT USAGE:
+     User managedUser = em.merge(user);
+     managedUser.setEmail("new@example.com"); // Tracked by dirty checking!
+     ```
+4. **`remove(entity)`:**
+   - Marks a `MANAGED` entity for deletion; generates an SQL `DELETE` at flush time.
+   - Calling `remove()` on a `DETACHED` entity throws an `IllegalArgumentException`. The entity must be loaded or merged into the persistence context first.
+
 ---
 
 ### 9.3 The Persistence Context, 1st-Level Cache, and Dirty Checking
 
 The **Persistence Context** is the in-memory transactional buffer managed by an `EntityManager`:
-1. **1st-Level Cache (Identity Map):** If you call `entityManager.find(User.class, 1L)` three times within the same transaction, Hibernate executes **one SQL query** and returns the exact same in-memory object reference (`p1 == p2`).
-2. **Snapshot Creation:** When an entity enters the `MANAGED` state, Hibernate saves a clean snapshot of its field values in memory.
-3. **Dirty Checking:** During `flush()` (which occurs before commit), Hibernate iterates across all managed entities, compares their current state against their loaded snapshot, and **automatically generates and executes SQL `UPDATE` statements** for any altered fields!
+1. **1st-Level Cache (Identity Map):** If you call `entityManager.find(User.class, 1L)` three times within the same transaction, Hibernate executes **one SQL query** and returns the exact same in-memory object reference (`p1 == p2`). This guarantees referential identity within a transaction.
+2. **Snapshot Creation:** When an entity enters the `MANAGED` state, Hibernate stores an internal snapshot array of its persistent attribute values in memory (`EntityEntry`).
+3. **Dirty Checking:** During `flush()` (which occurs automatically before query execution and transaction commit), Hibernate inspects managed entities to determine if their state has changed:
+   - **Default Snapshot-Based Dirty Checking:** Hibernate iterates over all managed entities in the persistence context and performs a property-by-property comparison against their loaded snapshot arrays. If differences exist, Hibernate schedules the appropriate SQL `UPDATE`.
+   - **SQL Statement Generation (Default vs. `@DynamicUpdate`):** By default, Hibernate generates and reuses an `UPDATE` statement that sets **all columns** of the entity table, even those that did not change. This allows Hibernate to reuse pre-compiled prepared statements. To update only the modified columns, the entity must be annotated with `@DynamicUpdate`, which trades CPU overhead (dynamic SQL compilation per update) for smaller database update payloads.
+   - **Bytecode Enhancement Dirty Tracking:** When using Hibernate build-time bytecode enhancement (`hibernate-enhance-maven-plugin`), entities implement `SelfDirtinessTracker`. Mutations in setter methods immediately flag the entity as dirty (`$$_hibernate_trackChange`), completely bypassing the CPU overhead of snapshot comparisons during flush.
 
 ```java
 @Transactional
@@ -881,10 +956,23 @@ public void updatePrice(Long productId, int newPrice) {
 
 ---
 
-### 9.4 Flush vs. Commit
+### 9.4 Flush vs. Commit and Persistence Context Lifecycles
 
-- **`flush()`:** Synchronizes the in-memory persistence context with the database by emitting pending SQL statements (`INSERT`, `UPDATE`, `DELETE`) over the open database connection. The database transaction remains open.
-- **`commit()`:** Issues the SQL `COMMIT` command to the database engine, making changes durable, and closes the persistence context.
+- **`flush()`:** Synchronizes the in-memory persistence context with the underlying database by emitting pending SQL statements (`INSERT`, `UPDATE`, `DELETE`) across the JDBC connection. The database transaction remains open, and changes are not yet visible to other concurrent transactions (depending on isolation level).
+- **`commit()`:** Issues the SQL `COMMIT` command to the database engine, making all flushed mutations durable on disk.
+
+#### Persistence Context Lifecycle Variations:
+1. **Transaction-Scoped Persistence Context (Standard Spring `@Transactional`):**
+   - The `EntityManager` is bound to the thread and active transaction.
+   - When the transaction commits, pending changes are flushed, the database transaction commits, and the persistence context is cleared and closed.
+   - **Upon Transaction Rollback:** The database transaction is rolled back and the persistence context is immediately cleared. Any managed entities in memory become detached and retain their modified in-memory values, making them out-of-sync with the database.
+2. **Open Session in View (OSIV / `spring.jpa.open-in-view=true`):**
+   - Enabled by default in Spring Boot web applications.
+   - Binds the persistence context to the **entire HTTP request lifecycle** (via `OpenEntityManagerInViewFilter`).
+   - The transaction commits when the `@Transactional` service method finishes, but the `EntityManager` remains open throughout the controller execution and Jackson JSON serialization.
+   - **Architectural Risk:** While OSIV allows controllers to lazily access uninitialized relationships without throwing `LazyInitializationException`, it risks holding or re-acquiring database connections during slow HTTP responses, leading to connection pool exhaustion under load.
+3. **Extended Persistence Context (`@PersistenceContext(type = PersistenceContextType.EXTENDED)`):**
+   - Spans multiple transactions, maintaining managed entity state across multiple requests until explicitly closed. Typically utilized in stateful components.
 
 ---
 
@@ -924,29 +1012,34 @@ List<Order> findAll();
 
 ### 10.1 How `@Transactional` Works: Dynamic AOP Proxies
 
-Spring does not modify compiled bytecode inside your service methods. Spring wraps your bean in a **Dynamic Proxy** (JDK Interface Proxy or CGLIB Subclass):
+Spring does not modify compiled Java bytecode inside your service methods by default. Instead, Spring wraps your bean in a **Dynamic Proxy** (CGLIB subclass by default in Spring Boot, or JDK Interface Proxy if configured):
 
 ```
 [ Incoming Call from Controller ]
                |
                v
-+-------------------------------------------------------+
-| Spring CGLIB / JDK Dynamic Proxy                     |
-|                                                       |
-|  1. PlatformTransactionManager.getTransaction()       |
-|     - Acquires DB Connection from HikariCP            |
-|     - Issues 'BEGIN TRANSACTION'                      |
-|                                                       |
-|  2. Invokes Target: orderService.placeOrder()         |
-|                                                       |
-|  3. On Success:                                       |
-|     - Issues 'COMMIT'                                 |
-|                                                       |
-|  4. On RuntimeException:                              |
-|     - Issues 'ROLLBACK'                               |
-|                                                       |
-|  5. Releases DB Connection back to pool               |
-+-------------------------------------------------------+
++----------------------------------------------------------------------------+
+| Spring CGLIB / JDK Dynamic Proxy (TransactionInterceptor)                 |
+|                                                                            |
+|  1. PlatformTransactionManager.getTransaction()                            |
+|     - Prepares transaction context.                                        |
+|     - [Connection Timing Note: In DataSourceTransactionManager, a physical |
+|       HikariCP connection is acquired immediately. In JpaTransactionManager|
+|       or with LazyConnectionDataSourceProxy, physical connection checkout  |
+|       is deferred until the first actual SQL statement is executed!]       |
+|     - Sets autoCommit = false                                              |
+|                                                                            |
+|  2. Invokes Target: orderService.placeOrder()                              |
+|                                                                            |
+|  3. On Success:                                                            |
+|     - Flushes pending changes                                              |
+|     - Issues SQL 'COMMIT'                                                  |
+|                                                                            |
+|  4. On Error (Default: RuntimeException / Error):                          |
+|     - Issues SQL 'ROLLBACK'                                                |
+|                                                                            |
+|  5. Releases/Closes DB Connection back to pool                             |
++----------------------------------------------------------------------------+
 ```
 
 ---
@@ -971,18 +1064,24 @@ public class OrderService {
 }
 ```
 
-**The Disaster:** When `processBatch()` calls `this.saveSingleOrder()`, it invokes the method on the **raw target object**, completely bypassing the Spring Proxy! The transaction interceptor is never invoked; no transaction is started, and no rollback occurs if an exception is thrown!
+**The Disaster:** When `processBatch()` calls `this.saveSingleOrder()`, Java executes the method on the **raw target object** (`this`), completely bypassing the Spring Proxy! The `TransactionInterceptor` is never invoked; no transaction is started, and no rollback occurs if an exception is thrown!
 
 #### How to Resolve Self-Invocation:
-1. Move `saveSingleOrder()` to a separate collaborator service bean (`OrderPersistenceService`).
-2. Self-inject the bean via application context.
-3. Use programmatic transaction templates (`TransactionTemplate`).
+1. **Architectural Separation (Recommended):** Extract `saveSingleOrder()` into a dedicated collaborator service bean (`OrderPersistenceService`). When `OrderService` calls the collaborator, it calls through the collaborator's injected proxy, correctly triggering the transaction interceptor.
+2. **Programmatic Transactions (`TransactionTemplate`):** Avoid proxy dependencies entirely by using Spring's `TransactionTemplate`:
+   ```java
+   transactionTemplate.executeWithoutResult(status -> {
+       // Executes within an explicit transaction boundary!
+   });
+   ```
+3. **Self-Injection with `@Lazy`:** Inject the bean into itself (`@Autowired @Lazy private OrderService self;`) and invoke `self.saveSingleOrder()`. (Note: `@Lazy` is required to avoid circular constructor dependencies).
+4. **AspectJ Bytecode Weaving (`mode = AdviceMode.ASPECTJ`):** By configuring Spring to use AspectJ compile-time or load-time weaving (LTW) rather than standard AOP dynamic proxies, the transactional advice is woven directly into the method's compiled bytecode. In AspectJ mode, self-invocation *does* trigger transactions because no proxy wrapper is required.
 
 ---
 
 ### 10.3 Default Rollback Rules: Checked vs. Unchecked Exceptions
 
-By default, Spring `@Transactional` rolls back **ONLY on unchecked exceptions** (`RuntimeException` and `Error`):
+By default, Spring `@Transactional` rolls back **ONLY on unchecked exceptions** (`RuntimeException` and `Error`), and **commits on checked exceptions** (`java.lang.Exception` subclasses):
 
 ```java
 // FATAL TRAP:
@@ -999,6 +1098,13 @@ public void processPayment() throws InsufficientFundsException {
     // Now rolls back on all Exceptions!
 }
 ```
+
+#### Historical Context and Modern Production Policy:
+- **EJB Historical Rationale:** Spring's default behavior originates from the enterprise Java (EJB) convention: checked exceptions were categorized as predictable *application/business outcomes* (e.g., `InsufficientFundsException`) where a caller might catch the exception and choose to commit partial progress or audit records. In contrast, unchecked exceptions (`RuntimeException`) represented unrecoverable *system infrastructure failures* requiring immediate rollback.
+- **Modern Best Practices:**
+  - Standardize domain exceptions on **unchecked exceptions** (inheriting from `RuntimeException`) so they roll back transactions automatically without annotation boilerplate.
+  - When checked exceptions cross transaction boundaries, explicitly declare `@Transactional(rollbackFor = Exception.class)` (or `Throwable.class`).
+  - Use `noRollbackFor = NonFatalAuditException.class` when specific business exceptions must intentionally preserve committed state.
 
 ---
 
@@ -1101,42 +1207,64 @@ In high-concurrency microservices, log statements from hundreds of concurrent re
 
 ---
 
-### 13.2 Health vs. Readiness Probes
+### 13.2 Health vs. Readiness Probes and Kubernetes Orchestration
 
-In containerized environments (Kubernetes):
-- **Liveness Probe (`/actuator/health/liveness`):** Checks if the process is alive. If this fails, the container is deadlocked or crashed; the orchestrator **restarts** the container.
-- **Readiness Probe (`/actuator/health/readiness`):** Checks if the application is ready to accept traffic (database connection pool connected, caches primed). If this fails, traffic is diverted, but the container is **not restarted**.
+In containerized cloud platforms (Kubernetes), container lifecycle management relies on distinct probe semantics:
+
+1. **Liveness Probe (`/actuator/health/liveness`):**
+   - **Semantics:** Determines whether the container process is alive and internally healthy (e.g., event loop not permanently deadlocked, main threads not hung).
+   - **Action on Failure:** The orchestrator immediately kills the container and initiates a container **restart**.
+   - **The Golden Rule of Liveness Probes:** **Never check external dependencies (databases, caches, third-party APIs) in a liveness probe!** If an external database experiences a momentary failover or network hiccup, every backend pod checking the database will fail its liveness check simultaneously. Kubernetes will restart every container across the entire fleet in an unrecoverable cascading restart storm!
+2. **Readiness Probe (`/actuator/health/readiness`):**
+   - **Semantics:** Determines whether the application pod is ready to receive incoming client traffic.
+   - **Action on Failure:** The orchestrator removes the pod's IP address from the Kubernetes Service endpoints list. No new client requests are routed to the pod, but the container process **is not killed or restarted**.
+3. **Spring Boot `ApplicationAvailability` and Graceful Shutdown:**
+   - Spring Boot separates liveness (`LivenessState.CORRECT` vs. `BROKEN`) from readiness (`ReadinessState.ACCEPTING_TRAFFIC` vs. `REFUSING_TRAFFIC`).
+   - During application startup, readiness remains `REFUSING_TRAFFIC` until all Spring beans are wired, flyway migrations finish, and the embedded web server is listening.
+   - During graceful shutdown (`server.shutdown=graceful`), upon receiving `SIGTERM`, Spring Boot immediately transitions readiness to `REFUSING_TRAFFIC`. Kubernetes stops routing new traffic to the pod while existing in-flight HTTP requests are given a grace period (`spring.lifecycle.timeout-per-shutdown-phase=30s`) to drain completely before the process terminates.
+   - **External Dependencies in Readiness:** If readiness checks downstream databases, a temporary database slowdown can cause all pods to drop out of the Service endpoints simultaneously, resulting in total cluster-wide HTTP 503 blackouts. Spring Boot isolates the core readiness probe from external subsystem health indicators by default to prevent cluster-wide endpoint eviction.
 
 ---
 
 ## Section 14 — Spring Boot vs. Node.js & Express: Comprehensive Architectural Comparison and Selection Guide
 
 ```
-+-----------------------------------------------------------------------------------------+
-| SPRING BOOT 3.X VS. NODE.JS / EXPRESS.JS ARCHITECTURAL COMPARISON MATRIX                |
-+----------------------+----------------------------------+-------------------------------+
-| Architectural Pillar | Spring Boot 3.x (Java 21)        | Node.js 20+ / Express.js (TS) |
-+----------------------+----------------------------------+-------------------------------+
-| Concurrency Model    | Multi-threaded Thread-per-request| Single-threaded Event Loop    |
-|                      | (Tomcat Worker Pool) + Virtual   | (V8 Call Stack + libuv Poll)  |
-|                      | Threads (Project Loom)           |                               |
-| Type Safety          | Nominal Static Typing (Compile   | Structural Static Typing      |
-|                      | and JVM bytecode enforced)       | (Erased at runtime!)          |
-| Dependency Injection | Built-in IoC Container (Dynamic  | None natively (Manual wiring  |
-|                      | Proxies, Lifecycle hooks)        | or third-party TS libraries)  |
-| Persistence & ORM    | JPA / Hibernate / Spring Data    | Prisma / TypeORM / Drizzle /  |
-|                      | (First-level cache, dirty check) | Raw SQL pool clients          |
-| Transaction Model    | Declarative (@Transactional AOP) | Programmatic transaction      |
-|                      |                                  | client checkout/commit        |
-| Memory Footprint     | 250MB - 1GB+ baseline            | 50MB - 150MB baseline         |
-| Startup Time         | 2 - 15 seconds                   | 100ms - 1 second              |
-| CPU-Bound Workload   | Native multi-core CPU scaling    | Blocks event loop unless off- |
-|                      | across OS threads                | loaded to Worker Threads      |
-| Typical Sweet Spot   | Complex domain business logic,   | High-concurrency I/O APIs,    |
-|                      | enterprise transactions, batch   | real-time websockets, BFFs,   |
-|                      | compute                          | rapid JSON microservices      |
-+----------------------+----------------------------------+-------------------------------+
++-----------------------------------------------------------------------------------------------------+
+| SPRING BOOT 3.X VS. NODE.JS / EXPRESS.JS ARCHITECTURAL COMPARISON MATRIX                            |
++----------------------+---------------------------------------+--------------------------------------+
+| Architectural Pillar | Spring Boot 3.x (Java 21)             | Node.js 20+ / Express.js (TS)        |
++----------------------+---------------------------------------+--------------------------------------+
+| Concurrency Model    | Multi-threaded Thread-per-request     | Single-threaded Event Loop           |
+|                      | (Tomcat Worker Pool) + Virtual Threads| (V8 Call Stack + libuv Poll Loop)    |
+|                      | (Project Loom: unmounts on I/O)       |                                      |
+| Type Safety          | Nominal Static Typing (Compile and    | Structural Static Typing (Compile    |
+|                      | JVM bytecode / reflection enforced)   | checked only; erased at runtime!)    |
+| Dependency Injection | Built-in IoC Container (Dynamic       | None natively (Manual constructor    |
+|                      | Proxies, Lifecycle post-processors)   | wiring or third-party TS containers) |
+| Persistence & ORM    | JPA / Hibernate / Spring Data         | Prisma / TypeORM / Drizzle /         |
+|                      | (1st-level cache, dirty checking)     | Raw SQL pool clients (node-pg)       |
+| Transaction Model    | Declarative (@Transactional AOP)      | Programmatic transaction client      |
+|                      | with propagation & rollback policies  | checkout, query execution, & commit  |
+| Memory Footprint     | JRE Runtime Baseline                  | V8 Isolate Baseline                  |
+|                      | - Heap + Metaspace + thread stacks    | - V8 Heap + libuv buffers            |
+|                      | - Typically 150MB–500MB+ on standard  | - Typically 40MB–150MB baseline      |
+|                      |   JVM; reduced to 30MB–60MB with      | - Scales with buffer allocations     |
+|                      |   Spring Boot 3 GraalVM Native Image  |   and npm dependency tree size       |
+| Startup Latency      | Classpath Scanning & JIT Warmup       | Fast Script Evaluation               |
+|                      | - 1s–8s on standard JVM (bytecode JIT | - 50ms–1s typical script evaluation  |
+|                      |   compilation and reflection scan)    | - Increases with heavy native addons |
+|                      | - 30ms–100ms with GraalVM Native      |   and large multi-package bundles    |
+| CPU-Bound Workload   | Native multi-core CPU scaling across  | Blocks event loop unless offloaded   |
+|                      | OS threads and thread pools           | to Worker Threads or external queues |
+| Typical Sweet Spot   | Complex domain business logic,        | High-concurrency I/O APIs, real-time |
+|                      | enterprise multi-table transactions,  | WebSockets, Backend-for-Frontend     |
+|                      | financial systems, regulated workflows| (BFF), rapid microservices           |
++----------------------+---------------------------------------+--------------------------------------+
 ```
+
+#### Understanding the Architectural Drivers of Memory and Startup:
+- **JVM Runtime Model:** On a standard JVM, memory is partitioned across the Java Heap, Metaspace (class metadata), thread stacks (default 1MB per platform thread; virtual threads reduce stack memory to hundreds of bytes), and JIT compiler structures. Startup latency reflects classloading from multiple JARs, reflection-based annotation inspection, and JIT compiler (C1/C2) warmup. With **Spring Boot 3 AOT and GraalVM Native Image**, reflection and configuration are pre-computed at build time, yielding instant sub-100ms startups and minimal memory footprints.
+- **Node.js Runtime Model:** Node.js executes JavaScript on the Google V8 engine. Startup is fast because V8 compiles JavaScript directly to bytecode on demand without heavy framework reflection scanning. Memory is governed by the V8 heap (`--max-old-space-size`). However, Node.js applications with deep npm dependency graphs, heavy ORM binaries, or large in-memory caches can also exhibit elevated memory usage and longer initialization times.
 
 ---
 
@@ -1189,7 +1317,8 @@ $$\text{Socket} \to \text{Parser} \to \text{Filters/Middleware} \to \text{Routin
 ---
 
 ### 2. Node.js Event Loop Priority Order
-$$\text{Synchronous Stack} \to \text{process.nextTick} \to \text{Promise Microtasks} \to \text{Timers} \to \text{Poll (I/O)} \to \text{Check (setImmediate)}$$
+$$\text{Synchronous Call Stack} \to \text{process.nextTick Queue} \to \text{V8 Promise Microtasks} \to \text{Timers} \to \text{Poll (I/O)} \to \text{Check (setImmediate)}$$
+*(Note: Since Node.js 11.0+, microtasks drain immediately after each individual macrotask callback concludes, not merely between phases).*
 
 ---
 
@@ -1205,18 +1334,19 @@ $$\text{Synchronous Stack} \to \text{process.nextTick} \to \text{Promise Microta
 ---
 
 ### 4. Spring `@Transactional` Quick Checklist
-- **Visibility Rule:** Method must be `public`.
-- **Invocation Rule:** Call must come from an **external** bean through the proxy (no `this.method()`).
-- **Rollback Rule:** Explicitly declare `@Transactional(rollbackFor = Exception.class)`.
+- **Method Visibility Rule:** For standard Spring AOP proxies, method must not be `private` (historically `public` only; in Spring 6.0+ CGLIB proxies can intercept package-private methods, but `private` methods are never proxied without AspectJ weaving).
+- **Invocation Rule:** Call must come from an **external** collaborator bean through the proxy (no `this.method()`).
+- **Rollback Rule:** Explicitly declare `@Transactional(rollbackFor = Exception.class)` or standardize on unchecked exceptions.
 - **Scope Rule:** Never execute slow remote HTTP calls or file I/O inside an open transaction.
+- **Connection Timing:** In `JpaTransactionManager` or with `LazyConnectionDataSourceProxy`, physical connection acquisition is deferred until the first SQL execution.
 
 ---
 
 ### 5. Architectural Rules of Thumb
-- **DTO Standard:** Never expose JPA or ORM entities directly over HTTP API boundaries.
-- **Trust Boundary Standard:** TypeScript types do not validate runtime JSON; always use runtime validation schemas (Zod).
-- **Graceful Shutdown Standard:** Intercept `SIGTERM`, close HTTP listeners, drain active connections, and close database connection pools.
-- **Connection Pool Sizing:** Size connection pools to $((\text{CPU Cores} \times 2) + \text{Spindles})$.
+- **DTO Standard:** Never expose JPA or ORM entities directly over HTTP API boundaries; prevents mass assignment and serialization recursion.
+- **Trust Boundary Standard:** TypeScript types are erased at runtime and provide zero HTTP payload validation; always use runtime validation schemas (Zod).
+- **Graceful Shutdown Standard:** Intercept `SIGTERM`, transition readiness to `REFUSING_TRAFFIC`, wait for in-flight requests to drain, close HTTP listeners, and close database connection pools.
+- **Connection Pool Sizing Standard:** Total database server capacity benchmark (HikariCP) is $\text{Connections} = (\text{CPU Cores} \times 2) + \text{Effective Spindles}$. In multi-instance deployments with $N$ application pods, size pool per pod such that $(N \times \text{pool\_size}) \le \text{DB max\_connections}$ to prevent database connection exhaustion.
 
 ---
 
