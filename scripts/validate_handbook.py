@@ -42,6 +42,7 @@ MODULE_01_REQUIRED_SECTIONS = [
     "Section 18 — Sorting and Searching Trade-Offs",
     "Section 19 — Pattern Recognition and Problem-Solving Method",
     "Section 20 — Interview Practice and Self-Assessment",
+    "Section 21 — DSA Cheatsheet: Interview Revision Reference",
 ]
 
 PLACEHOLDER_PATTERNS = [
@@ -186,18 +187,34 @@ def main() -> int:
         failures.append(f"MODULE 1: {msg}")
         print(f"  [FAIL] {msg}")
         
-    # 3. Section Completeness
-    print("\n[3/6] Validating Module 1 Section Completeness (20 Required Sections)...")
+    # 3. Section Completeness and Final Section Check
+    print("\n[3/6] Validating Module 1 Section Completeness (21 Sections including Cheatsheet)...")
     if mod1_path.exists():
         ok, missing = check_sections(mod1_path, MODULE_01_REQUIRED_SECTIONS)
         if ok:
-            passes.append("MODULE 1 SECTIONS: All 20 required sections present and verified.")
-            print("  [PASS] All 20 required sections present.")
+            passes.append("MODULE 1 SECTIONS: All 21 sections present and verified.")
+            print("  [PASS] All 21 required sections present.")
         else:
             failures.append(f"MODULE 1 SECTIONS: Missing sections: {missing}")
             print(f"  [FAIL] Missing {len(missing)} section(s):")
             for m in missing:
                 print(f"         - {m}")
+
+        # Verify Section 21 is the final major section
+        with open(mod1_path, "r", encoding="utf-8") as f:
+            mod_text = f.read()
+        major_sections = re.findall(r"^##\s+Section\s+(\d+)\s*[-—–]\s*(.+)$", mod_text, re.MULTILINE)
+        if major_sections:
+            last_sec_num, last_sec_title = major_sections[-1]
+            if last_sec_num == "21":
+                passes.append("FINAL SECTION: Section 21 is verified as the final major section.")
+                print(f"  [PASS] Section 21 is verified as the final major section: '{last_sec_title.strip()}'")
+            else:
+                failures.append(f"FINAL SECTION: Expected Section 21 to be final, but found Section {last_sec_num}.")
+                print(f"  [FAIL] Expected Section 21 to be final, but found Section {last_sec_num}.")
+        else:
+            failures.append("FINAL SECTION: No major sections found.")
+            print("  [FAIL] No major sections found in Module 1.")
     else:
         failures.append("MODULE 1 SECTIONS: Skipped because file does not exist")
         print("  [FAIL] Cannot inspect sections: file does not exist")

@@ -234,6 +234,67 @@ public class Module01CodeExamples {
     }
 
     // =========================================================================
+    // 6.5 GRAPH TRAVERSALS: Breadth-First Search & Depth-First Search
+    // =========================================================================
+
+    /**
+     * Breadth-First Search (BFS) for unweighted graph traversal.
+     * Computes shortest path distances from source node to all reachable nodes.
+     * Time Complexity: O(V + E)
+     * Auxiliary Space: O(V) for queue and visited array.
+     */
+    public static int[] bfsDistances(int numVertices, List<List<Integer>> adjList, int source) {
+        if (numVertices <= 0 || source < 0 || source >= numVertices) {
+            throw new IllegalArgumentException("Invalid vertices or source");
+        }
+        int[] dist = new int[numVertices];
+        Arrays.fill(dist, -1);
+        boolean[] visited = new boolean[numVertices];
+        Deque<Integer> queue = new ArrayDeque<>();
+
+        visited[source] = true;
+        dist[source] = 0;
+        queue.offer(source);
+
+        while (!queue.isEmpty()) {
+            int u = queue.poll();
+            for (int v : adjList.get(u)) {
+                if (!visited[v]) {
+                    visited[v] = true;
+                    dist[v] = dist[u] + 1;
+                    queue.offer(v);
+                }
+            }
+        }
+        return dist;
+    }
+
+    /**
+     * Depth-First Search (DFS) for reachable component discovery.
+     * Time Complexity: O(V + E)
+     * Auxiliary Space: O(V) call-stack depth in worst case (e.g. line graph).
+     */
+    public static List<Integer> dfsReachable(int numVertices, List<List<Integer>> adjList, int source) {
+        if (numVertices <= 0 || source < 0 || source >= numVertices) {
+            throw new IllegalArgumentException("Invalid vertices or source");
+        }
+        List<Integer> order = new ArrayList<>();
+        boolean[] visited = new boolean[numVertices];
+        dfsHelper(source, adjList, visited, order);
+        return order;
+    }
+
+    private static void dfsHelper(int u, List<List<Integer>> adjList, boolean[] visited, List<Integer> order) {
+        visited[u] = true;
+        order.add(u);
+        for (int v : adjList.get(u)) {
+            if (!visited[v]) {
+                dfsHelper(v, adjList, visited, order);
+            }
+        }
+    }
+
+    // =========================================================================
     // 7. DIJKSTRA'S ALGORITHM: Non-Negative Single-Source Shortest Paths
     // =========================================================================
 
@@ -387,7 +448,24 @@ public class Module01CodeExamples {
         assert dsu.getComponentCount() == 3;
         System.out.println("  [PASS] Disjoint Set Union (Path Compression & Rank)");
 
-        // Test 8: Dijkstra's Shortest Path
+        // Test 8: Graph Traversals (BFS & DFS)
+        int graphNodes = 4;
+        List<List<Integer>> unweightedAdj = new ArrayList<>();
+        for (int i = 0; i < graphNodes; i++) unweightedAdj.add(new ArrayList<>());
+        unweightedAdj.get(0).add(1);
+        unweightedAdj.get(0).add(2);
+        unweightedAdj.get(1).add(2);
+        unweightedAdj.get(2).add(0);
+        unweightedAdj.get(2).add(3);
+        unweightedAdj.get(3).add(3);
+
+        int[] bfsDist = bfsDistances(graphNodes, unweightedAdj, 0);
+        assert bfsDist[0] == 0 && bfsDist[1] == 1 && bfsDist[2] == 1 && bfsDist[3] == 2 : "BFS distances failed";
+        List<Integer> dfsPath = dfsReachable(graphNodes, unweightedAdj, 0);
+        assert dfsPath.size() == 4 && dfsPath.contains(3) : "DFS reachable failed";
+        System.out.println("  [PASS] Graph Traversals (BFS Distances & DFS Reachability)");
+
+        // Test 9: Dijkstra's Shortest Path
         int vCount = 5;
         List<List<Edge>> adj = new ArrayList<>();
         for (int i = 0; i < vCount; i++) adj.add(new ArrayList<>());
@@ -402,7 +480,7 @@ public class Module01CodeExamples {
         assert dists[0] == 0 && dists[1] == 3 && dists[2] == 1 && dists[3] == 4 && dists[4] == 7 : "Dijkstra failed";
         System.out.println("  [PASS] Dijkstra's Algorithm (PriorityQueue Shortest Paths)");
 
-        // Test 9: 0/1 Knapsack
+        // Test 10: 0/1 Knapsack
         int[] values = new int[]{60, 100, 120};
         int[] weights = new int[]{10, 20, 30};
         int capacity = 50;
@@ -410,11 +488,11 @@ public class Module01CodeExamples {
         assert maxVal == 220 : "0/1 Knapsack max value failed, expected 220, got " + maxVal;
         System.out.println("  [PASS] Dynamic Programming (0/1 Knapsack Tabulation)");
 
-        // Test 10: Backtracking Subsets
+        // Test 11: Backtracking Subsets
         List<List<Integer>> subsets = generateSubsets(new int[]{1, 2, 3});
         assert subsets.size() == 8 : "Subsets count failed, expected 8, got " + subsets.size();
         System.out.println("  [PASS] Backtracking (Include/Exclude Subsets)");
 
-        System.out.println("\nAll 10 Algorithmic Test Suites Passed Successfully!");
+        System.out.println("\nAll 11 Algorithmic Test Suites Passed Successfully!");
     }
 }
