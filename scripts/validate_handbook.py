@@ -62,6 +62,27 @@ MODULE_02_REQUIRED_SECTIONS = [
     "Section 13 — OS and Computer Networks Cheatsheet",
 ]
 
+# Required Section Titles for Module 3
+MODULE_03_REQUIRED_SECTIONS = [
+    "Section 1 — Java’s Execution Model and Architecture",
+    "Section 2 — Primitive Types, References, and Value Semantics",
+    "Section 3 — Classes, Objects, and Initialization Mechanics",
+    "Section 4 — The Four OOP Principles in Practice",
+    "Section 5 — Overloading, Overriding, and Dynamic Dispatch",
+    "Section 6 — Abstract Classes and Interfaces",
+    "Section 7 — Inheritance, Composition, and SOLID Design",
+    "Section 8 — Object Methods, Equality, and Hashing Contracts",
+    "Section 9 — Strings, Immutability, and Defensive Design",
+    "Section 10 — Generics and the Type System",
+    "Section 11 — Exceptions and Fault-Tolerant Error Handling",
+    "Section 12 — Collections Framework and Core API Semantics",
+    "Section 13 — Lambdas, Functional Interfaces, and Streams",
+    "Section 14 — Enums, Records, Annotations, and Modern Java",
+    "Section 15 — JVM Memory Architecture, Garbage Collection, and JIT",
+    "Section 16 — High-Value Interview Reasoning and Question Bank",
+    "Section 17 — Java and OOP Cheatsheet: Interview Revision Reference",
+]
+
 PLACEHOLDER_PATTERNS = [
     re.compile(r"\bTODO\b", re.IGNORECASE),
     re.compile(r"\bTBD\b", re.IGNORECASE),
@@ -159,8 +180,12 @@ def check_ledger_status(ledger_path: Path) -> tuple[bool, str]:
     if "modules/module_02_os_networks.md" not in content and "MOD-02-OS-NET" not in content:
         return False, "Module 2 is not recorded in QUALITY_LEDGER.md"
 
-    # Verify Module 1 is recorded as USER APPROVED (explicit user authorization)
+    if "modules/module_03_java_oop.md" not in content and "MOD-03-JAVA-OOP" not in content:
+        return False, "Module 3 is not recorded in QUALITY_LEDGER.md"
+
     lines = content.splitlines()
+
+    # Verify Module 1 is recorded as USER APPROVED
     mod1_approved = False
     for line in lines:
         if "module_01_dsa.md" in line or "**01**" in line:
@@ -170,13 +195,23 @@ def check_ledger_status(ledger_path: Path) -> tuple[bool, str]:
     if not mod1_approved:
         return False, "Module 1 must be marked 'USER APPROVED' reflecting explicit human authorization."
 
-    # Ensure Module 2 is NOT marked USER APPROVED prematurely
+    # Verify Module 2 is recorded as USER APPROVED
+    mod2_approved = False
     for line in lines:
         if "module_02_os_networks.md" in line or "**02**" in line:
             if "USER APPROVED" in line:
-                return False, "VIOLATION: Module 2 is marked 'USER APPROVED' in the ledger! Only human users may grant approval."
+                mod2_approved = True
+                break
+    if not mod2_approved:
+        return False, "Module 2 must be marked 'USER APPROVED' reflecting explicit human authorization."
+
+    # Ensure Module 3 is NOT marked USER APPROVED prematurely
+    for line in lines:
+        if "module_03_java_oop.md" in line or "**03**" in line:
+            if "USER APPROVED" in line:
+                return False, "VIOLATION: Module 3 is marked 'USER APPROVED' in the ledger! Only human users may grant approval."
                 
-    return True, "Quality ledger correctly tracks Module 1 (USER APPROVED) and Module 2 (READY FOR USER REVIEW)"
+    return True, "Quality ledger correctly tracks Module 1 (USER APPROVED), Module 2 (USER APPROVED), and Module 3 (READY FOR USER REVIEW)"
 
 def main() -> int:
     repo_root = Path(__file__).resolve().parent.parent
@@ -189,7 +224,7 @@ def main() -> int:
     passes = []
     
     # 1. Foundation Files
-    print("[1/7] Validating Foundation Files...")
+    print("[1/8] Validating Foundation Files...")
     for rel_path in REQUIRED_FOUNDATION_FILES:
         ok, msg = check_file_exists(repo_root, rel_path)
         if ok:
@@ -199,8 +234,8 @@ def main() -> int:
             failures.append(f"FOUNDATION: {msg}")
             print(f"  [FAIL] {msg}")
             
-    # 2. Module 1 File Existence and Integrity
-    print("\n[2/7] Validating Module 1 Source (Approved)...")
+    # 2. Module 1 File Existence and Integrity (Approved)
+    print("\n[2/8] Validating Module 1 Source (Approved)...")
     mod1_path = repo_root / "modules" / "module_01_dsa.md"
     ok, msg = check_file_exists(repo_root, "modules/module_01_dsa.md")
     if ok:
@@ -229,8 +264,8 @@ def main() -> int:
             failures.append("MODULE 1 FINAL SECTION: Section 21 is not final.")
             print("  [FAIL] Section 21 is not final.")
 
-    # 3. Module 2 File Existence and Integrity
-    print("\n[3/7] Validating Module 2 Source (Ready for Review)...")
+    # 3. Module 2 File Existence and Integrity (Approved)
+    print("\n[3/8] Validating Module 2 Source (Approved)...")
     mod2_path = repo_root / "modules" / "module_02_os_networks.md"
     ok, msg = check_file_exists(repo_root, "modules/module_02_os_networks.md")
     if ok:
@@ -240,8 +275,6 @@ def main() -> int:
         failures.append(f"MODULE 2: {msg}")
         print(f"  [FAIL] {msg}")
 
-    # 4. Module 2 Section Completeness & Cheatsheet Final Section Check
-    print("\n[4/7] Validating Module 2 Section Completeness (13 Sections including Cheatsheet)...")
     if mod2_path.exists():
         ok, missing = check_sections(mod2_path, MODULE_02_REQUIRED_SECTIONS)
         if ok:
@@ -256,24 +289,53 @@ def main() -> int:
         with open(mod2_path, "r", encoding="utf-8") as f:
             mod2_text = f.read()
         major2 = re.findall(r"^##\s+Section\s+(\d+)\s*[-—–]\s*(.+)$", mod2_text, re.MULTILINE)
-        if major2:
-            last2_num, last2_title = major2[-1]
-            if last2_num == "13":
-                passes.append("MODULE 2 FINAL SECTION: Section 13 is verified as the final major section.")
-                print(f"  [PASS] Section 13 is verified as the final major section: '{last2_title.strip()}'")
-            else:
-                failures.append(f"MODULE 2 FINAL SECTION: Expected Section 13 to be final, found Section {last2_num}.")
-                print(f"  [FAIL] Expected Section 13 to be final, found Section {last2_num}.")
+        if major2 and major2[-1][0] == "13":
+            passes.append("MODULE 2 FINAL SECTION: Section 13 verified final.")
+            print(f"  [PASS] Section 13 verified as final major section: '{major2[-1][1].strip()}'")
         else:
-            failures.append("MODULE 2 FINAL SECTION: No major sections found in Module 2.")
-            print("  [FAIL] No major sections found in Module 2.")
+            failures.append("MODULE 2 FINAL SECTION: Section 13 is not final.")
+            print("  [FAIL] Section 13 is not final.")
+
+    # 4. Module 3 File Existence, Section Completeness & Cheatsheet Final Section Check
+    print("\n[4/8] Validating Module 3 Source (Ready for Review - 17 Sections including Cheatsheet)...")
+    mod3_path = repo_root / "modules" / "module_03_java_oop.md"
+    ok, msg = check_file_exists(repo_root, "modules/module_03_java_oop.md")
+    if ok:
+        passes.append(f"MODULE 3: {msg}")
+        print(f"  [PASS] {msg}")
     else:
-        failures.append("MODULE 2 SECTIONS: Skipped because file does not exist")
-        print("  [FAIL] Cannot inspect sections: file does not exist")
+        failures.append(f"MODULE 3: {msg}")
+        print(f"  [FAIL] {msg}")
+
+    if mod3_path.exists():
+        ok, missing = check_sections(mod3_path, MODULE_03_REQUIRED_SECTIONS)
+        if ok:
+            passes.append("MODULE 3 SECTIONS: All 17 sections present.")
+            print("  [PASS] All 17 required sections present.")
+        else:
+            failures.append(f"MODULE 3 SECTIONS: Missing sections: {missing}")
+            print(f"  [FAIL] Missing {len(missing)} section(s):")
+            for m in missing:
+                print(f"         - {m}")
+
+        with open(mod3_path, "r", encoding="utf-8") as f:
+            mod3_text = f.read()
+        major3 = re.findall(r"^##\s+Section\s+(\d+)\s*[-—–]\s*(.+)$", mod3_text, re.MULTILINE)
+        if major3:
+            last3_num, last3_title = major3[-1]
+            if last3_num == "17":
+                passes.append("MODULE 3 FINAL SECTION: Section 17 is verified as the final major section.")
+                print(f"  [PASS] Section 17 is verified as the final major section: '{last3_title.strip()}'")
+            else:
+                failures.append(f"MODULE 3 FINAL SECTION: Expected Section 17 to be final, found Section {last3_num}.")
+                print(f"  [FAIL] Expected Section 17 to be final, found Section {last3_num}.")
+        else:
+            failures.append("MODULE 3 FINAL SECTION: No major sections found in Module 3.")
+            print("  [FAIL] No major sections found in Module 3.")
 
     # 5. Code Fence Balance
-    print("\n[5/7] Validating Code Fence Balance across Modules...")
-    for mod_path in [mod1_path, mod2_path]:
+    print("\n[5/8] Validating Code Fence Balance across Modules...")
+    for mod_path in [mod1_path, mod2_path, mod3_path]:
         if mod_path.exists():
             ok, msg = check_code_fences(mod_path)
             if ok:
@@ -284,8 +346,8 @@ def main() -> int:
                 print(f"  [FAIL] {msg}")
 
     # 6. Placeholders in Modules
-    print("\n[6/7] Checking for Placeholders (TODO, TBD, [placeholder], etc.)...")
-    for mod_path in [mod1_path, mod2_path]:
+    print("\n[6/8] Checking for Placeholders (TODO, TBD, [placeholder], etc.)...")
+    for mod_path in [mod1_path, mod2_path, mod3_path]:
         if mod_path.exists():
             ok, issues = check_placeholders(mod_path)
             if ok:
@@ -297,9 +359,9 @@ def main() -> int:
                 for issue in issues[:5]:
                     print(f"         - {issue}")
 
-    # 7. Quality Ledger and QA Report Integrity
-    print("\n[7/7] Validating Quality Ledger and QA Reports...")
-    for qa_name in ["module_01_qa.md", "module_02_qa.md"]:
+    # 7. QA Reports
+    print("\n[7/8] Validating QA Reports...")
+    for qa_name in ["module_01_qa.md", "module_02_qa.md", "module_03_qa.md"]:
         ok, msg = check_file_exists(repo_root, f"reviews/{qa_name}")
         if ok:
             passes.append(f"QA REPORT ({qa_name}): {msg}")
@@ -307,7 +369,9 @@ def main() -> int:
         else:
             failures.append(f"QA REPORT ({qa_name}): {msg}")
             print(f"  [FAIL] {msg}")
-        
+
+    # 8. Quality Ledger Integrity
+    print("\n[8/8] Validating Quality Ledger Integrity...")
     ledger_path = repo_root / "QUALITY_LEDGER.md"
     ok, msg = check_ledger_status(ledger_path)
     if ok:
