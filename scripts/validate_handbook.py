@@ -222,6 +222,41 @@ MODULE_09_REQUIRED_SECTIONS = [
     "Section 27 — Module 9 Cheatsheet: Concurrency & Distributed Systems",
 ]
 
+# Required Section Titles for Module 10
+MODULE_10_REQUIRED_SECTIONS = [
+    "Section 1 — What System Design Interviews Evaluate",
+    "Section 2 — A Repeatable System-Design Interview Framework",
+    "Section 3 — Functional and Non-Functional Requirements",
+    "Section 4 — Clarifying Questions, Assumptions, Scope, and Constraints",
+    "Section 5 — Workload Estimation",
+    "Section 6 — Latency Percentiles, Throughput, Availability, Reliability, and Durability",
+    "Section 7 — API and Data-Contract Design",
+    "Section 8 — Data Modeling and Access-Pattern-Driven Schema Design",
+    "Section 9 — Relational Databases versus NoSQL",
+    "Section 10 — Indexes, Query Patterns, Partitioning, and Data Growth",
+    "Section 11 — Vertical Scaling, Horizontal Scaling, and Bottlenecks",
+    "Section 12 — Stateless Services, Load Balancing, and Service Discovery",
+    "Section 13 — Caching Strategies, Invalidation, Consistency, and Failure Modes",
+    "Section 14 — Synchronous versus Asynchronous Architecture",
+    "Section 15 — Queues, Event-Driven Systems, and Backpressure",
+    "Section 16 — Replication, Partitioning, Sharding, and Rebalancing",
+    "Section 17 — Consistency, Transactions, and Distributed Data Ownership",
+    "Section 18 — Rate Limiting, Quotas, Admission Control, and Overload Protection",
+    "Section 19 — Resilience: Timeouts, Retries, Circuit Breakers, Bulkheads, and Graceful Degradation",
+    "Section 20 — Availability Zones, Regional Architecture, and Disaster Recovery",
+    "Section 21 — Security Boundaries, Authentication, Authorization, Secrets, and Data Protection",
+    "Section 22 — Observability, SLOs, SLIs, Error Budgets, and Incident Response",
+    "Section 23 — Deployment Strategies, Migrations, Rollback, and Backward Compatibility",
+    "Section 24 — Monoliths, Modular Monoliths, Microservices, and When to Split Services",
+    "Section 25 — Cost, Operational Complexity, and Build-versus-Buy Trade-Offs",
+    "Section 26 — Architecture Decision Records and Communicating Trade-Offs",
+    "Section 27 — End-to-End Design Case Studies",
+    "Section 28 — Common System-Design Interview Mistakes",
+    "Section 29 — Scenario-Based Exercises with Solution Walkthroughs",
+    "Section 30 — Interview Questions with Strong Answer Frameworks",
+    "Section 31 — Module 10 Cheatsheet: System Design & Production Architecture",
+]
+
 PLACEHOLDER_PATTERNS = [
     re.compile(r"\bTODO\b", re.IGNORECASE),
     re.compile(r"\bTBD\b", re.IGNORECASE),
@@ -340,6 +375,9 @@ def check_ledger_status(ledger_path: Path) -> tuple[bool, str]:
     if "modules/module_09_concurrency_distributed_systems.md" not in content and "MOD-09-CONCURRENCY-DIST" not in content:
         return False, "Module 9 is not recorded in QUALITY_LEDGER.md"
 
+    if "modules/module_10_system_design_production_architecture.md" not in content and "MOD-10-SYSTEM-DESIGN" not in content:
+        return False, "Module 10 is not recorded in QUALITY_LEDGER.md"
+
     lines = content.splitlines()
 
     # Verify Module 1 is recorded as USER APPROVED
@@ -444,7 +482,23 @@ def check_ledger_status(ledger_path: Path) -> tuple[bool, str]:
             if "USER APPROVED" in line:
                 return False, "VIOLATION: Module 9 is marked 'USER APPROVED' in the ledger! Only human users may grant approval."
 
-    return True, "Quality ledger correctly tracks Modules 1-7 (USER APPROVED) and Modules 8-9 (READY FOR USER REVIEW)"
+    # Verify Module 10 is recorded as READY FOR USER REVIEW
+    mod10_ready = False
+    for line in lines:
+        if "module_10_system_design_production_architecture.md" in line or "**10**" in line:
+            if "READY FOR USER REVIEW" in line:
+                mod10_ready = True
+                break
+    if not mod10_ready:
+        return False, "Module 10 must be recorded as 'READY FOR USER REVIEW'."
+
+    # Ensure Module 10 is NOT marked USER APPROVED prematurely
+    for line in lines:
+        if "module_10_system_design_production_architecture.md" in line or "**10**" in line:
+            if "USER APPROVED" in line:
+                return False, "VIOLATION: Module 10 is marked 'USER APPROVED' in the ledger! Only human users may grant approval."
+
+    return True, "Quality ledger correctly tracks Modules 1-7 (USER APPROVED) and Modules 8-10 (READY FOR USER REVIEW)"
 
 def main() -> int:
     repo_root = Path(__file__).resolve().parent.parent
@@ -457,7 +511,7 @@ def main() -> int:
     passes = []
 
     # 1. Foundation Files
-    print("[1/13] Validating Foundation Files...")
+    print("[1/15] Validating Foundation Files...")
     for rel_path in REQUIRED_FOUNDATION_FILES:
         ok, msg = check_file_exists(repo_root, rel_path)
         if ok:
@@ -468,7 +522,7 @@ def main() -> int:
             print(f"  [FAIL] {msg}")
 
     # 2. Module 1 File Existence and Integrity (Approved)
-    print("\n[2/13] Validating Module 1 Source (Approved)...")
+    print("\n[2/15] Validating Module 1 Source (Approved)...")
     mod1_path = repo_root / "modules" / "module_01_dsa.md"
     ok, msg = check_file_exists(repo_root, "modules/module_01_dsa.md")
     if ok:
@@ -498,7 +552,7 @@ def main() -> int:
             print("  [FAIL] Section 21 is not final.")
 
     # 3. Module 2 File Existence and Integrity (Approved)
-    print("\n[3/13] Validating Module 2 Source (Approved)...")
+    print("\n[3/15] Validating Module 2 Source (Approved)...")
     mod2_path = repo_root / "modules" / "module_02_os_networks.md"
     ok, msg = check_file_exists(repo_root, "modules/module_02_os_networks.md")
     if ok:
@@ -530,7 +584,7 @@ def main() -> int:
             print("  [FAIL] Section 13 is not final.")
 
     # 4. Module 3 File Existence and Integrity (Approved)
-    print("\n[4/13] Validating Module 3 Source (Approved)...")
+    print("\n[4/15] Validating Module 3 Source (Approved)...")
     mod3_path = repo_root / "modules" / "module_03_java_oop.md"
     ok, msg = check_file_exists(repo_root, "modules/module_03_java_oop.md")
     if ok:
@@ -562,7 +616,7 @@ def main() -> int:
             print("  [FAIL] Section 17 is not final.")
 
     # 5. Module 4 File Existence, Section Completeness & Cheatsheet Final Section Check (Approved)
-    print("\n[5/13] Validating Module 4 Source (Approved - 16 Sections)...")
+    print("\n[5/15] Validating Module 4 Source (Approved - 16 Sections)...")
     mod4_path = repo_root / "modules" / "module_04_database_engineering.md"
     ok, msg = check_file_exists(repo_root, "modules/module_04_database_engineering.md")
     if ok:
@@ -599,7 +653,7 @@ def main() -> int:
             print("  [FAIL] No major sections found in Module 4.")
 
     # 6. Module 5 File Existence, Section Completeness & Cheatsheet Final Section Check (Approved)
-    print("\n[6/13] Validating Module 5 Source (Approved - 16 Sections)...")
+    print("\n[6/15] Validating Module 5 Source (Approved - 16 Sections)...")
     mod5_path = repo_root / "modules" / "module_05_backend_frameworks.md"
     ok, msg = check_file_exists(repo_root, "modules/module_05_backend_frameworks.md")
     if ok:
@@ -636,7 +690,7 @@ def main() -> int:
             print("  [FAIL] No major sections found in Module 5.")
 
     # 7. Module 6 File Existence, Section Completeness, Cheatsheet Final Section & TOC Check (Approved)
-    print("\n[7/13] Validating Module 6 Source (Approved - 16 Sections including Cheatsheet)...")
+    print("\n[7/15] Validating Module 6 Source (Approved - 16 Sections including Cheatsheet)...")
     mod6_path = repo_root / "modules" / "module_06_api_engineering_security.md"
     ok, msg = check_file_exists(repo_root, "modules/module_06_api_engineering_security.md")
     if ok:
@@ -682,7 +736,7 @@ def main() -> int:
             print("  [FAIL] Cheatsheet is missing from the Table of Contents.")
 
     # 8. Module 7 File Existence, Section Completeness, Cheatsheet Final Section & TOC Check (Approved)
-    print("\n[8/13] Validating Module 7 Source (Approved - 18 Sections including Cheatsheet)...")
+    print("\n[8/15] Validating Module 7 Source (Approved - 18 Sections including Cheatsheet)...")
     mod7_path = repo_root / "modules" / "module_07_caching_performance.md"
     ok, msg = check_file_exists(repo_root, "modules/module_07_caching_performance.md")
     if ok:
@@ -743,7 +797,7 @@ def main() -> int:
             print(f"  [FAIL] {msg}")
 
     # 9. Module 8 File Existence, Section Completeness, Cheatsheet Final Section & TOC Check (Ready for Review)
-    print("\n[9/13] Validating Module 8 Source (Ready for Review - 22 Sections including Cheatsheet)...")
+    print("\n[9/15] Validating Module 8 Source (Ready for Review - 22 Sections including Cheatsheet)...")
     mod8_path = repo_root / "modules" / "module_08_async_processing_messaging.md"
     ok, msg = check_file_exists(repo_root, "modules/module_08_async_processing_messaging.md")
     if ok:
@@ -803,7 +857,7 @@ def main() -> int:
             print(f"  [FAIL] {msg}")
 
     # 10. Module 9 File Existence, Section Completeness, Cheatsheet Final Section & TOC Check (Ready for Review)
-    print("\n[10/14] Validating Module 9 Source (Ready for Review - 27 Sections including Cheatsheet)...")
+    print("\n[10/15] Validating Module 9 Source (Ready for Review - 27 Sections including Cheatsheet)...")
     mod9_path = repo_root / "modules" / "module_09_concurrency_distributed_systems.md"
     ok, msg = check_file_exists(repo_root, "modules/module_09_concurrency_distributed_systems.md")
     if ok:
@@ -862,9 +916,69 @@ def main() -> int:
             failures.append(f"COMPANION ({comp_file}): {msg}")
             print(f"  [FAIL] {msg}")
 
-    # 11. Code Fence Balance
-    print("\n[11/14] Validating Code Fence Balance across Modules...")
-    for mod_path in [mod1_path, mod2_path, mod3_path, mod4_path, mod5_path, mod6_path, mod7_path, mod8_path, mod9_path]:
+    # 11. Module 10 File Existence, Section Completeness, Cheatsheet Final Section & TOC Check (Ready for Review)
+    print("\n[11/15] Validating Module 10 Source (Ready for Review - 31 Sections including Cheatsheet)...")
+    mod10_path = repo_root / "modules" / "module_10_system_design_production_architecture.md"
+    ok, msg = check_file_exists(repo_root, "modules/module_10_system_design_production_architecture.md")
+    if ok:
+        passes.append(f"MODULE 10: {msg}")
+        print(f"  [PASS] {msg}")
+    else:
+        failures.append(f"MODULE 10: {msg}")
+        print(f"  [FAIL] {msg}")
+
+    if mod10_path.exists():
+        ok, missing = check_sections(mod10_path, MODULE_10_REQUIRED_SECTIONS)
+        if ok:
+            passes.append("MODULE 10 SECTIONS: All 31 sections present.")
+            print("  [PASS] All 31 required sections present.")
+        else:
+            failures.append(f"MODULE 10 SECTIONS: Missing sections: {missing}")
+            print(f"  [FAIL] Missing {len(missing)} section(s):")
+            for m in missing:
+                print(f"         - {m}")
+
+        with open(mod10_path, "r", encoding="utf-8") as f:
+            mod10_text = f.read()
+        major10 = re.findall(r"^##\s+Section\s+(\d+)\s*[-—–]\s*(.+)$", mod10_text, re.MULTILINE)
+        if major10:
+            last10_num, last10_title = major10[-1]
+            if last10_num == "31":
+                passes.append("MODULE 10 FINAL SECTION: Section 31 is verified as the final major section.")
+                print(f"  [PASS] Section 31 is verified as the final major section: '{last10_title.strip()}'")
+            else:
+                failures.append(f"MODULE 10 FINAL SECTION: Expected Section 31 to be final, found Section {last10_num}.")
+                print(f"  [FAIL] Expected Section 31 to be final, found Section {last10_num}.")
+        else:
+            failures.append("MODULE 10 FINAL SECTION: No major sections found in Module 10.")
+            print("  [FAIL] No major sections found in Module 10.")
+
+        # Validate Cheatsheet in Table of Contents
+        toc10_match = re.search(r"\[Section 31.*Cheatsheet.*\]\(#section-31", mod10_text, re.IGNORECASE)
+        if toc10_match:
+            passes.append("MODULE 10 TOC CHEATSHEET: Cheatsheet is included in the Table of Contents.")
+            print("  [PASS] Cheatsheet is included in the Table of Contents.")
+        else:
+            failures.append("MODULE 10 TOC CHEATSHEET: Cheatsheet is missing from the Table of Contents.")
+            print("  [FAIL] Cheatsheet is missing from the Table of Contents.")
+
+    # Validate Module 10 Companion Files
+    for comp_file in [
+        "assets/code_examples/Module10SystemDesignExamples.java",
+        "assets/code_examples/module_10_node_architecture_examples.js",
+        "scripts/test_module_10_system_design.py",
+    ]:
+        ok, msg = check_file_exists(repo_root, comp_file)
+        if ok:
+            passes.append(f"COMPANION ({comp_file}): {msg}")
+            print(f"  [PASS] {msg}")
+        else:
+            failures.append(f"COMPANION ({comp_file}): {msg}")
+            print(f"  [FAIL] {msg}")
+
+    # 12. Code Fence Balance
+    print("\n[12/15] Validating Code Fence Balance across Modules...")
+    for mod_path in [mod1_path, mod2_path, mod3_path, mod4_path, mod5_path, mod6_path, mod7_path, mod8_path, mod9_path, mod10_path]:
         if mod_path.exists():
             ok, msg = check_code_fences(mod_path)
             if ok:
@@ -874,9 +988,9 @@ def main() -> int:
                 failures.append(f"CODE FENCES ({mod_path.name}): {msg}")
                 print(f"  [FAIL] {msg}")
 
-    # 12. Placeholders in Modules
-    print("\n[12/14] Checking for Placeholders (TODO, TBD, [placeholder], etc.)...")
-    for mod_path in [mod1_path, mod2_path, mod3_path, mod4_path, mod5_path, mod6_path, mod7_path, mod8_path, mod9_path]:
+    # 13. Placeholders in Modules
+    print("\n[13/15] Checking for Placeholders (TODO, TBD, [placeholder], etc.)...")
+    for mod_path in [mod1_path, mod2_path, mod3_path, mod4_path, mod5_path, mod6_path, mod7_path, mod8_path, mod9_path, mod10_path]:
         if mod_path.exists():
             ok, issues = check_placeholders(mod_path)
             if ok:
@@ -888,8 +1002,8 @@ def main() -> int:
                 for issue in issues[:5]:
                     print(f"         - {issue}")
 
-    # 13. QA Reports
-    print("\n[13/14] Validating QA Reports...")
+    # 14. QA Reports
+    print("\n[14/15] Validating QA Reports...")
     for qa_name in [
         "module_01_qa.md",
         "module_02_qa.md",
@@ -900,6 +1014,7 @@ def main() -> int:
         "module_07_qa.md",
         "module_08_qa.md",
         "module_09_qa.md",
+        "module_10_qa.md",
     ]:
         ok, msg = check_file_exists(repo_root, f"reviews/{qa_name}")
         if ok:
@@ -909,8 +1024,8 @@ def main() -> int:
             failures.append(f"QA REPORT ({qa_name}): {msg}")
             print(f"  [FAIL] {msg}")
 
-    # 14. Quality Ledger Integrity
-    print("\n[14/14] Validating Quality Ledger Integrity...")
+    # 15. Quality Ledger Integrity
+    print("\n[15/15] Validating Quality Ledger Integrity...")
     ledger_path = repo_root / "QUALITY_LEDGER.md"
     ok, msg = check_ledger_status(ledger_path)
     if ok:
