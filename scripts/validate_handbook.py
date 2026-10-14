@@ -191,6 +191,37 @@ MODULE_08_REQUIRED_SECTIONS = [
     "Section 22 — Module 8 Cheatsheet: Asynchronous Processing & Distributed Messaging",
 ]
 
+# Required Section Titles for Module 9
+MODULE_09_REQUIRED_SECTIONS = [
+    "Section 1 — Concurrency vs. Parallelism",
+    "Section 2 — Processes, Threads, and Execution Models",
+    "Section 3 — Shared Mutable State and Race Conditions",
+    "Section 4 — Atomicity, Visibility, Ordering, and the Java Memory Model",
+    "Section 5 — Happens-Before Relationships",
+    "Section 6 — Synchronization, Intrinsic Locks, and Explicit Locks",
+    "Section 7 — Deadlock, Livelock, Starvation, and Contention",
+    "Section 8 — Atomic Variables, CAS, and Lock-Free Primitives",
+    "Section 9 — Volatile: Memory Semantics, Visibility Guarantees, and What It Cannot Solve",
+    "Section 10 — Thread Pools and Executor Framework",
+    "Section 11 — Futures, CompletableFuture, and Asynchronous Pipelines",
+    "Section 12 — Producer-Consumer Coordination and Bounded Buffers",
+    "Section 13 — Concurrent Collections Architecture",
+    "Section 14 — Lock Granularity, Fairness, and Performance",
+    "Section 15 — Virtual Threads (Project Loom)",
+    "Section 16 — Distributed Systems Fundamentals",
+    "Section 17 — Clocks, Timeouts, Deadlines, and Failure Detection",
+    "Section 18 — Consistency Models",
+    "Section 19 — Replication, Quorum Concepts, and Partition Tolerance",
+    "Section 20 — Distributed Coordination, Leases, and Fencing Tokens",
+    "Section 21 — Idempotency and Safe Retries in Distributed Operations",
+    "Section 22 — CAP Theorem and Practical PACELC",
+    "Section 23 — Consensus Fundamentals",
+    "Section 24 — Distributed Transactions and Saga Patterns",
+    "Section 25 — Failure Scenarios, Debugging, Observability, and Production Incident Reasoning",
+    "Section 26 — Scenario-Driven Interview Question Bank",
+    "Section 27 — Module 9 Cheatsheet: Concurrency & Distributed Systems",
+]
+
 PLACEHOLDER_PATTERNS = [
     re.compile(r"\bTODO\b", re.IGNORECASE),
     re.compile(r"\bTBD\b", re.IGNORECASE),
@@ -306,6 +337,9 @@ def check_ledger_status(ledger_path: Path) -> tuple[bool, str]:
     if "modules/module_08_async_processing_messaging.md" not in content and "MOD-08-ASYNC-MSG" not in content:
         return False, "Module 8 is not recorded in QUALITY_LEDGER.md"
 
+    if "modules/module_09_concurrency_distributed_systems.md" not in content and "MOD-09-CONCURRENCY-DIST" not in content:
+        return False, "Module 9 is not recorded in QUALITY_LEDGER.md"
+
     lines = content.splitlines()
 
     # Verify Module 1 is recorded as USER APPROVED
@@ -394,7 +428,23 @@ def check_ledger_status(ledger_path: Path) -> tuple[bool, str]:
             if "USER APPROVED" in line:
                 return False, "VIOLATION: Module 8 is marked 'USER APPROVED' in the ledger! Only human users may grant approval."
 
-    return True, "Quality ledger correctly tracks Modules 1-7 (USER APPROVED) and Module 8 (READY FOR USER REVIEW)"
+    # Verify Module 9 is recorded as READY FOR USER REVIEW
+    mod9_ready = False
+    for line in lines:
+        if "module_09_concurrency_distributed_systems.md" in line or "**09**" in line:
+            if "READY FOR USER REVIEW" in line:
+                mod9_ready = True
+                break
+    if not mod9_ready:
+        return False, "Module 9 must be recorded as 'READY FOR USER REVIEW'."
+
+    # Ensure Module 9 is NOT marked USER APPROVED prematurely
+    for line in lines:
+        if "module_09_concurrency_distributed_systems.md" in line or "**09**" in line:
+            if "USER APPROVED" in line:
+                return False, "VIOLATION: Module 9 is marked 'USER APPROVED' in the ledger! Only human users may grant approval."
+
+    return True, "Quality ledger correctly tracks Modules 1-7 (USER APPROVED) and Modules 8-9 (READY FOR USER REVIEW)"
 
 def main() -> int:
     repo_root = Path(__file__).resolve().parent.parent
@@ -752,9 +802,69 @@ def main() -> int:
             failures.append(f"COMPANION ({comp_file}): {msg}")
             print(f"  [FAIL] {msg}")
 
-    # 10. Code Fence Balance
-    print("\n[10/13] Validating Code Fence Balance across Modules...")
-    for mod_path in [mod1_path, mod2_path, mod3_path, mod4_path, mod5_path, mod6_path, mod7_path, mod8_path]:
+    # 10. Module 9 File Existence, Section Completeness, Cheatsheet Final Section & TOC Check (Ready for Review)
+    print("\n[10/14] Validating Module 9 Source (Ready for Review - 27 Sections including Cheatsheet)...")
+    mod9_path = repo_root / "modules" / "module_09_concurrency_distributed_systems.md"
+    ok, msg = check_file_exists(repo_root, "modules/module_09_concurrency_distributed_systems.md")
+    if ok:
+        passes.append(f"MODULE 9: {msg}")
+        print(f"  [PASS] {msg}")
+    else:
+        failures.append(f"MODULE 9: {msg}")
+        print(f"  [FAIL] {msg}")
+
+    if mod9_path.exists():
+        ok, missing = check_sections(mod9_path, MODULE_09_REQUIRED_SECTIONS)
+        if ok:
+            passes.append("MODULE 9 SECTIONS: All 27 sections present.")
+            print("  [PASS] All 27 required sections present.")
+        else:
+            failures.append(f"MODULE 9 SECTIONS: Missing sections: {missing}")
+            print(f"  [FAIL] Missing {len(missing)} section(s):")
+            for m in missing:
+                print(f"         - {m}")
+
+        with open(mod9_path, "r", encoding="utf-8") as f:
+            mod9_text = f.read()
+        major9 = re.findall(r"^##\s+Section\s+(\d+)\s*[-—–]\s*(.+)$", mod9_text, re.MULTILINE)
+        if major9:
+            last9_num, last9_title = major9[-1]
+            if last9_num == "27":
+                passes.append("MODULE 9 FINAL SECTION: Section 27 is verified as the final major section.")
+                print(f"  [PASS] Section 27 is verified as the final major section: '{last9_title.strip()}'")
+            else:
+                failures.append(f"MODULE 9 FINAL SECTION: Expected Section 27 to be final, found Section {last9_num}.")
+                print(f"  [FAIL] Expected Section 27 to be final, found Section {last9_num}.")
+        else:
+            failures.append("MODULE 9 FINAL SECTION: No major sections found in Module 9.")
+            print("  [FAIL] No major sections found in Module 9.")
+
+        # Validate Cheatsheet in Table of Contents
+        toc9_match = re.search(r"\[Section 27.*Cheatsheet.*\]\(#section-27", mod9_text, re.IGNORECASE)
+        if toc9_match:
+            passes.append("MODULE 9 TOC CHEATSHEET: Cheatsheet is included in the Table of Contents.")
+            print("  [PASS] Cheatsheet is included in the Table of Contents.")
+        else:
+            failures.append("MODULE 9 TOC CHEATSHEET: Cheatsheet is missing from the Table of Contents.")
+            print("  [FAIL] Cheatsheet is missing from the Table of Contents.")
+
+    # Validate Module 9 Companion Files
+    for comp_file in [
+        "assets/code_examples/Module09ConcurrencyExamples.java",
+        "assets/code_examples/module_09_node_concurrency_examples.js",
+        "scripts/test_module_09_concurrency.py",
+    ]:
+        ok, msg = check_file_exists(repo_root, comp_file)
+        if ok:
+            passes.append(f"COMPANION ({comp_file}): {msg}")
+            print(f"  [PASS] {msg}")
+        else:
+            failures.append(f"COMPANION ({comp_file}): {msg}")
+            print(f"  [FAIL] {msg}")
+
+    # 11. Code Fence Balance
+    print("\n[11/14] Validating Code Fence Balance across Modules...")
+    for mod_path in [mod1_path, mod2_path, mod3_path, mod4_path, mod5_path, mod6_path, mod7_path, mod8_path, mod9_path]:
         if mod_path.exists():
             ok, msg = check_code_fences(mod_path)
             if ok:
@@ -764,9 +874,9 @@ def main() -> int:
                 failures.append(f"CODE FENCES ({mod_path.name}): {msg}")
                 print(f"  [FAIL] {msg}")
 
-    # 11. Placeholders in Modules
-    print("\n[11/13] Checking for Placeholders (TODO, TBD, [placeholder], etc.)...")
-    for mod_path in [mod1_path, mod2_path, mod3_path, mod4_path, mod5_path, mod6_path, mod7_path, mod8_path]:
+    # 12. Placeholders in Modules
+    print("\n[12/14] Checking for Placeholders (TODO, TBD, [placeholder], etc.)...")
+    for mod_path in [mod1_path, mod2_path, mod3_path, mod4_path, mod5_path, mod6_path, mod7_path, mod8_path, mod9_path]:
         if mod_path.exists():
             ok, issues = check_placeholders(mod_path)
             if ok:
@@ -778,8 +888,8 @@ def main() -> int:
                 for issue in issues[:5]:
                     print(f"         - {issue}")
 
-    # 12. QA Reports
-    print("\n[12/13] Validating QA Reports...")
+    # 13. QA Reports
+    print("\n[13/14] Validating QA Reports...")
     for qa_name in [
         "module_01_qa.md",
         "module_02_qa.md",
@@ -789,6 +899,7 @@ def main() -> int:
         "module_06_qa.md",
         "module_07_qa.md",
         "module_08_qa.md",
+        "module_09_qa.md",
     ]:
         ok, msg = check_file_exists(repo_root, f"reviews/{qa_name}")
         if ok:
@@ -798,8 +909,8 @@ def main() -> int:
             failures.append(f"QA REPORT ({qa_name}): {msg}")
             print(f"  [FAIL] {msg}")
 
-    # 13. Quality Ledger Integrity
-    print("\n[13/13] Validating Quality Ledger Integrity...")
+    # 14. Quality Ledger Integrity
+    print("\n[14/14] Validating Quality Ledger Integrity...")
     ledger_path = repo_root / "QUALITY_LEDGER.md"
     ok, msg = check_ledger_status(ledger_path)
     if ok:
