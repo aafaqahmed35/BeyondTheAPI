@@ -99,6 +99,98 @@ export class IdempotentConsumer {
 }
 
 // =========================================================================
+// 2B. POSTGRESQL CONDITIONAL IDEMPOTENCY & EXTERNAL PAYMENT RECONCILIATION
+// =========================================================================
+
+export class PostgresConditionalInbox {
+  constructor() {
+    this.inbox = new Set();
+    this.businessMutations = 0;
+  }
+
+  processDelivery(messageId) {
+    // Simulates INSERT INTO processed_messages ... ON CONFLICT DO NOTHING RETURNING message_id
+    if (this.inbox.has(messageId)) {
+      // Conflict: do not execute business mutation, commit clean tx, ACK broker
+      return { inserted: false, mutated: false };
+    }
+
+    this.inbox.add(messageId);
+    this.businessMutations++;
+    return { inserted: true, mutated: true };
+  }
+}
+
+export class MockExternalPaymentGateway {
+  constructor() {
+    this.charges = new Map(); // idempotencyKey -> amount
+    this.callCount = 0;
+  }
+
+  async charge(idempotencyKey, amount, simulateTimeout = false) {
+    this.callCount++;
+    if (this.charges.has(idempotencyKey)) {
+      return { success: true, chargeId: `ch_${idempotencyKey}`, wasDuplicate: true };
+    }
+    this.charges.set(idempotencyKey, amount);
+    if (simulateTimeout) {
+      throw new Error('ReadTimeoutException: network dropped after provider debit');
+    }
+    return { success: true, chargeId: `ch_${idempotencyKey}`, wasDuplicate: false };
+  }
+
+  async queryStatus(idempotencyKey) {
+    if (this.charges.has(idempotencyKey)) {
+      return { success: true, chargeId: `ch_${idempotencyKey}` };
+    }
+    return { success: false, chargeId: null };
+  }
+}
+
+export class DurablePaymentCoordinator {
+  constructor(gateway) {
+    this.gateway = gateway;
+    this.orders = new Map(); // orderId -> { state, idempotencyKey, amount, chargeId }
+  }
+
+  createOrder(orderId, amount) {
+    const idempotencyKey = `idem_order_${orderId}`;
+    const order = { orderId, idempotencyKey, amount, state: 'INITIATED', chargeId: null };
+    this.orders.set(orderId, order);
+    return order;
+  }
+
+  async processWithCrashWindow(orderId) {
+    const order = this.orders.get(orderId);
+    order.state = 'SUBMITTED_TO_PROVIDER';
+
+    try {
+      const resp = await this.gateway.charge(order.idempotencyKey, order.amount, true);
+      order.state = 'CAPTURED';
+      order.chargeId = resp.chargeId;
+    } catch {
+      // Invariant: external side effect is ambiguous.
+      // An inbox row or INITIATED state does NOT mean safe completion!
+      order.state = 'REQUIRES_RECONCILIATION';
+    }
+  }
+
+  async reconcile() {
+    for (const order of this.orders.values()) {
+      if (order.state === 'REQUIRES_RECONCILIATION') {
+        const queryResp = await this.gateway.queryStatus(order.idempotencyKey);
+        if (queryResp.success) {
+          order.state = 'CAPTURED';
+          order.chargeId = queryResp.chargeId;
+        } else {
+          order.state = 'DECLINED';
+        }
+      }
+    }
+  }
+}
+
+// =========================================================================
 // 3. RETRY HANDLER WITH BACKOFF & DEAD-LETTER QUEUE
 // =========================================================================
 
@@ -277,6 +369,62 @@ async function runTests() {
   assert.equal(consumer.balance, 100, 'Balance credited exactly once');
   console.log('    -> Passed: Idempotent consumer collapsed 10 concurrent events into 1 business effect.');
 
+  // TEST 2B
+  console.log('  [TEST 2B] PostgreSQL Conditional Idempotency: First vs Duplicate Delivery...');
+  const pgInbox = new PostgresConditionalInbox();
+
+  // 1. First delivery executes one mutation
+  const firstRes = pgInbox.processDelivery('msg-ord-100');
+  assert.equal(firstRes.inserted, true);
+  assert.equal(firstRes.mutated, true);
+  assert.equal(pgInbox.businessMutations, 1);
+
+  // 2. Duplicate delivery executes no second mutation
+  const dupRes = pgInbox.processDelivery('msg-ord-100');
+  assert.equal(dupRes.inserted, false);
+  assert.equal(dupRes.mutated, false);
+  assert.equal(pgInbox.businessMutations, 1);
+
+  // 3. Concurrent duplicate delivery: exactly one succeeds
+  const concPromises = [];
+  for (let i = 0; i < 8; i++) {
+    concPromises.push(Promise.resolve().then(() => pgInbox.processDelivery('msg-ord-concurrent')));
+  }
+  const concResults = await Promise.all(concPromises);
+  const concMutated = concResults.filter((r) => r.mutated);
+  assert.equal(concMutated.length, 1, 'Only 1 concurrent delivery may execute mutation');
+  assert.equal(pgInbox.businessMutations, 2, 'Total business mutations must be 2');
+  console.log('    -> Passed: First delivery executed 1 mutation; duplicate executed 0; concurrent duplicates isolated.');
+
+  // TEST 2C
+  console.log('  [TEST 2C] Ambiguous External Payment Side Effect & Reconciliation Invariants...');
+  const gateway = new MockExternalPaymentGateway();
+  const coordinator = new DurablePaymentCoordinator(gateway);
+
+  // Step 1: Create payment order with durable state and stable idempotency key
+  const order = coordinator.createOrder('order-999', 250);
+  assert.equal(order.state, 'INITIATED');
+  assert.equal(order.idempotencyKey, 'idem_order_order-999');
+
+  // Step 2: Consumer executes payment, but network drops after provider successfully debited card!
+  await coordinator.processWithCrashWindow('order-999');
+
+  // INVARIANT 1: Ambiguous external side effect is NOT treated as safely completed merely because an inbox/initiated row exists
+  const crashedState = coordinator.orders.get('order-999');
+  assert.equal(crashedState.state, 'REQUIRES_RECONCILIATION');
+
+  // INVARIANT 2: Card WAS debited at provider
+  assert.equal(gateway.charges.size, 1);
+  assert.equal(gateway.callCount, 1);
+
+  // INVARIANT 3: Asynchronous reconciliation recovers outcome using stable key without double-charging
+  await coordinator.reconcile();
+  const reconciledState = coordinator.orders.get('order-999');
+  assert.equal(reconciledState.state, 'CAPTURED');
+  assert.equal(reconciledState.chargeId, 'ch_idem_order_order-999');
+  assert.equal(gateway.charges.size, 1, 'Provider must still have exactly 1 debit (no double charge)');
+  console.log('    -> Passed: Ambiguous external side effect quarantined to REQUIRES_RECONCILIATION and reconciled without double debit.');
+
   // TEST 3
   console.log('  [TEST 3] Bounded Retries, Exponential Backoff, and DLQ Quarantine...');
   const retryHandler = new RetryHandler(3, 10, 50);
@@ -349,7 +497,7 @@ async function runTests() {
   assert.throws(() => worker.submit(async () => {}), /shutting down/);
   console.log('    -> Passed: In-flight async tasks drained cleanly before shutdown.');
 
-  console.log('\nAll 5 Node.js Messaging & Asynchronous Test Suites Passed Successfully!');
+  console.log('\nAll 7 Node.js Messaging & Asynchronous Test Suites Passed Successfully!');
 }
 
 runTests().catch((err) => {

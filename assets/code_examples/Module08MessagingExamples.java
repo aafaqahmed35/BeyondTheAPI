@@ -137,6 +137,167 @@ public class Module08MessagingExamples {
     }
 
     // =========================================================================
+    // 2B. POSTGRESQL CONDITIONAL IDEMPOTENCY & EXTERNAL PAYMENT RECONCILIATION
+    // =========================================================================
+
+    /**
+     * Simulates PostgreSQL 9.5+ atomic inbox deduplication:
+     * INSERT INTO processed_messages (message_id, created_at)
+     * VALUES (?, NOW())
+     * ON CONFLICT (message_id) DO NOTHING
+     * RETURNING message_id;
+     */
+    public static class PostgresConditionalInbox {
+        private final Set<String> inboxRecords = ConcurrentHashMap.newKeySet();
+        private final AtomicInteger businessMutations = new AtomicInteger(0);
+
+        /**
+         * Simulates executing the INSERT ... ON CONFLICT DO NOTHING RETURNING message_id.
+         * Returns true if the row was inserted (RETURNING returned a row).
+         * Returns false if conflict occurred (RETURNING was empty).
+         */
+        public boolean tryInsertDeduplicationKey(String messageId) {
+            return inboxRecords.add(messageId);
+        }
+
+        public boolean processDelivery(String messageId) {
+            // Safe conditional branching based on RETURNING result
+            boolean newlyInserted = tryInsertDeduplicationKey(messageId);
+            if (!newlyInserted) {
+                // Duplicate delivery: execute NO business mutation, commit clean transaction, ACK broker
+                return false;
+            }
+            // First delivery: execute exactly one business mutation
+            businessMutations.incrementAndGet();
+            return true;
+        }
+
+        public int getBusinessMutations() {
+            return businessMutations.get();
+        }
+
+        public int getInboxCount() {
+            return inboxRecords.size();
+        }
+    }
+
+    public enum ExternalPaymentState {
+        INITIATED,
+        SUBMITTED_TO_PROVIDER,
+        CAPTURED,
+        DECLINED,
+        REQUIRES_RECONCILIATION
+    }
+
+    public static class MockExternalPaymentGateway {
+        private final ConcurrentHashMap<String, Double> settledCharges = new ConcurrentHashMap<>();
+        private final AtomicInteger apiCallCount = new AtomicInteger(0);
+
+        public record GatewayResponse(boolean success, String chargeId, boolean wasDuplicate) {}
+
+        public GatewayResponse chargeWithIdempotencyKey(String idempotencyKey, double amount, boolean simulateNetworkTimeout) {
+            apiCallCount.incrementAndGet();
+            Double previous = settledCharges.putIfAbsent(idempotencyKey, amount);
+            if (previous != null) {
+                // Provider recognized existing charge for this stable key — zero double-charge!
+                return new GatewayResponse(true, "ch_" + idempotencyKey, true);
+            }
+            if (simulateNetworkTimeout) {
+                // Ambiguous failure: provider charged the card, but network dropped before client received HTTP 200!
+                throw new RuntimeException("ReadTimeoutException: remote gateway connection dropped after debit");
+            }
+            return new GatewayResponse(true, "ch_" + idempotencyKey, false);
+        }
+
+        public GatewayResponse queryChargeStatus(String idempotencyKey) {
+            Double existing = settledCharges.get(idempotencyKey);
+            if (existing != null) {
+                return new GatewayResponse(true, "ch_" + idempotencyKey, true);
+            }
+            return new GatewayResponse(false, null, false);
+        }
+
+        public int getApiCallCount() {
+            return apiCallCount.get();
+        }
+
+        public int getUniqueSettledChargeCount() {
+            return settledCharges.size();
+        }
+    }
+
+    public static class DurablePaymentCoordinator {
+        public record PaymentOrder(
+                String orderId,
+                String providerIdempotencyKey,
+                double amount,
+                ExternalPaymentState state,
+                String chargeId
+        ) {}
+
+        private final ConcurrentHashMap<String, PaymentOrder> databaseTable = new ConcurrentHashMap<>();
+        private final MockExternalPaymentGateway gateway;
+
+        public DurablePaymentCoordinator(MockExternalPaymentGateway gateway) {
+            this.gateway = gateway;
+        }
+
+        public PaymentOrder createPaymentOrder(String orderId, double amount) {
+            // Stable provider idempotency key derived from business domain identity
+            String stableKey = "idem_order_" + orderId;
+            PaymentOrder order = new PaymentOrder(orderId, stableKey, amount, ExternalPaymentState.INITIATED, null);
+            databaseTable.put(orderId, order);
+            return order;
+        }
+
+        public void executePaymentWithCrashWindow(String orderId) {
+            PaymentOrder current = databaseTable.get(orderId);
+            assert current != null;
+
+            // Transition state to SUBMITTED before external call
+            databaseTable.put(orderId, new PaymentOrder(orderId, current.providerIdempotencyKey(), current.amount(),
+                    ExternalPaymentState.SUBMITTED_TO_PROVIDER, null));
+
+            try {
+                // Call external payment gateway with simulated network crash/timeout
+                MockExternalPaymentGateway.GatewayResponse resp =
+                        gateway.chargeWithIdempotencyKey(current.providerIdempotencyKey(), current.amount(), true);
+                databaseTable.put(orderId, new PaymentOrder(orderId, current.providerIdempotencyKey(), current.amount(),
+                        ExternalPaymentState.CAPTURED, resp.chargeId()));
+            } catch (RuntimeException ex) {
+                // CRITICAL ARCHITECTURAL REALITY:
+                // An external call cannot be atomic with a local database transaction.
+                // An inbox record or INITIATED record does NOT mean payment safely completed!
+                // We mark the durable state as REQUIRES_RECONCILIATION so an async worker resolves it.
+                databaseTable.put(orderId, new PaymentOrder(orderId, current.providerIdempotencyKey(), current.amount(),
+                        ExternalPaymentState.REQUIRES_RECONCILIATION, null));
+            }
+        }
+
+        public void reconcileAmbiguousPayments() {
+            for (Map.Entry<String, PaymentOrder> entry : databaseTable.entrySet()) {
+                PaymentOrder order = entry.getValue();
+                if (order.state() == ExternalPaymentState.REQUIRES_RECONCILIATION) {
+                    // Query provider using the SAME stable idempotency key
+                    MockExternalPaymentGateway.GatewayResponse queryResp =
+                            gateway.queryChargeStatus(order.providerIdempotencyKey());
+                    if (queryResp.success()) {
+                        databaseTable.put(entry.getKey(), new PaymentOrder(order.orderId(), order.providerIdempotencyKey(),
+                                order.amount(), ExternalPaymentState.CAPTURED, queryResp.chargeId()));
+                    } else {
+                        databaseTable.put(entry.getKey(), new PaymentOrder(order.orderId(), order.providerIdempotencyKey(),
+                                order.amount(), ExternalPaymentState.DECLINED, null));
+                    }
+                }
+            }
+        }
+
+        public PaymentOrder getOrder(String orderId) {
+            return databaseTable.get(orderId);
+        }
+    }
+
+    // =========================================================================
     // 3. RETRY STRATEGIES: EXPONENTIAL BACKOFF, FULL JITTER, & RETRY BUDGETS
     // =========================================================================
 
@@ -470,6 +631,8 @@ public class Module08MessagingExamples {
         System.out.println("=================================================================");
 
         testIdempotentConsumerUnderConcurrentDelivery();
+        testPostgresConditionalIdempotencyInvariants();
+        testAmbiguousExternalPaymentReconciliation();
         testExponentialBackoffJitterAndRetryBudget();
         testDeadLetterQueueQuarantineAndRedrive();
         testTransactionalOutboxPattern();
@@ -477,7 +640,7 @@ public class Module08MessagingExamples {
         testMessageLeaseAndVisibilityTimeoutExpiration();
         testGracefulWorkerShutdown();
 
-        System.out.println("\nAll 7 Java Messaging & Asynchronous Test Suites Passed Successfully!");
+        System.out.println("\nAll 9 Java Messaging & Asynchronous Test Suites Passed Successfully!");
     }
 
     private static void testIdempotentConsumerUnderConcurrentDelivery() throws Exception {
@@ -521,6 +684,85 @@ public class Module08MessagingExamples {
         assert processor.getBalance("acc-42") == 500.0 : "Account balance should only receive 1 credit of 500.0, got: " + processor.getBalance("acc-42");
 
         System.out.println("    -> Passed: 10 concurrent duplicate messages resulted in exactly 1 business mutation.");
+    }
+
+    private static void testPostgresConditionalIdempotencyInvariants() throws Exception {
+        System.out.println("  [TEST 1B] PostgreSQL Conditional Idempotency: First vs Duplicate Delivery...");
+        PostgresConditionalInbox inbox = new PostgresConditionalInbox();
+
+        // 1. First delivery executes one mutation
+        boolean firstRes = inbox.processDelivery("msg-ord-100");
+        assert firstRes : "First delivery must succeed";
+        assert inbox.getBusinessMutations() == 1 : "First delivery must execute exactly 1 business mutation";
+
+        // 2. Duplicate delivery executes no second mutation
+        boolean dupRes = inbox.processDelivery("msg-ord-100");
+        assert !dupRes : "Duplicate delivery must return false";
+        assert inbox.getBusinessMutations() == 1 : "Duplicate delivery must execute NO second mutation";
+
+        // 3. Concurrent duplicate attempts cannot both perform the mutation
+        int threads = 8;
+        ExecutorService pool = Executors.newFixedThreadPool(threads);
+        CountDownLatch startLatch = new CountDownLatch(1);
+        CountDownLatch doneLatch = new CountDownLatch(threads);
+        List<Boolean> concurrentResults = new CopyOnWriteArrayList<>();
+
+        for (int i = 0; i < threads; i++) {
+            pool.submit(() -> {
+                try {
+                    startLatch.await();
+                    concurrentResults.add(inbox.processDelivery("msg-ord-concurrent"));
+                } catch (Exception e) {
+                    throw new RuntimeException(e);
+                } finally {
+                    doneLatch.countDown();
+                }
+            });
+        }
+        startLatch.countDown();
+        doneLatch.await(5, TimeUnit.SECONDS);
+        pool.shutdown();
+
+        long successCount = concurrentResults.stream().filter(b -> b).count();
+        long rejectedCount = concurrentResults.stream().filter(b -> !b).count();
+
+        assert successCount == 1 : "Only 1 concurrent delivery may execute mutation, got: " + successCount;
+        assert rejectedCount == threads - 1 : "Remaining concurrent attempts must be rejected without mutation";
+        assert inbox.getBusinessMutations() == 2 : "Total mutations must be 2 (1 sequential + 1 concurrent), got: " + inbox.getBusinessMutations();
+
+        System.out.println("    -> Passed: First delivery executed 1 mutation; duplicate executed 0; concurrent duplicates isolated.");
+    }
+
+    private static void testAmbiguousExternalPaymentReconciliation() {
+        System.out.println("  [TEST 1C] Ambiguous External Payment Side Effect & Reconciliation Invariants...");
+        MockExternalPaymentGateway gateway = new MockExternalPaymentGateway();
+        DurablePaymentCoordinator coordinator = new DurablePaymentCoordinator(gateway);
+
+        // Step 1: Create payment order with durable state and stable idempotency key
+        DurablePaymentCoordinator.PaymentOrder order = coordinator.createPaymentOrder("order-999", 250.0);
+        assert order.state() == ExternalPaymentState.INITIATED;
+        assert order.providerIdempotencyKey().equals("idem_order_order-999");
+
+        // Step 2: Consumer executes payment, but network drops after provider successfully debited card!
+        coordinator.executePaymentWithCrashWindow("order-999");
+
+        // INVARIANT 1: Ambiguous external side effect is NOT treated as safely completed merely because an inbox/initiated row exists
+        DurablePaymentCoordinator.PaymentOrder crashedState = coordinator.getOrder("order-999");
+        assert crashedState.state() == ExternalPaymentState.REQUIRES_RECONCILIATION :
+                "Ambiguous call must not be treated as CAPTURED, got: " + crashedState.state();
+
+        // INVARIANT 2: Card WAS debited at provider
+        assert gateway.getUniqueSettledChargeCount() == 1 : "Provider debited exactly once";
+        assert gateway.getApiCallCount() == 1 : "One API attempt made so far";
+
+        // INVARIANT 3: Asynchronous reconciliation recovers outcome using the stable idempotency key without double-charging
+        coordinator.reconcileAmbiguousPayments();
+        DurablePaymentCoordinator.PaymentOrder reconciledState = coordinator.getOrder("order-999");
+        assert reconciledState.state() == ExternalPaymentState.CAPTURED : "Reconciled state must be CAPTURED";
+        assert reconciledState.chargeId() != null : "Charge ID must be recovered";
+        assert gateway.getUniqueSettledChargeCount() == 1 : "Provider must still have exactly 1 unique debit (no double charge)";
+
+        System.out.println("    -> Passed: Ambiguous external side effect quarantined to REQUIRES_RECONCILIATION and reconciled without double debit.");
     }
 
     private static void testExponentialBackoffJitterAndRetryBudget() {

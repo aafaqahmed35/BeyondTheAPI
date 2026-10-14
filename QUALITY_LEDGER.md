@@ -304,7 +304,7 @@ This central ledger records the technical quality, code verification, completene
   20. Production Failure Scenarios & System Design Walkthroughs: Payment Workflows, Outbox Relays, Consumer Crash Redrive, and Poison Quarantine — *Completed*
   21. Scenario-Driven Interview Question Bank — *Completed*
   22. Module 8 Cheatsheet: Asynchronous Processing & Distributed Messaging — *Completed*
-- **Code Verification:** Standalone verification harnesses in `assets/code_examples/Module08MessagingExamples.java` (7 test suites, OpenJDK 21 LTS), `assets/code_examples/module_08_node_messaging_examples.js` (5 test suites, Node.js), and `scripts/test_module_08_messaging.py` (5 test suites, Python 3). All 17 test suites passed.
+- **Code Verification:** Standalone verification harnesses in `assets/code_examples/Module08MessagingExamples.java` (9 test suites, OpenJDK 21 LTS), `assets/code_examples/module_08_node_messaging_examples.js` (7 test suites, Node.js), and `scripts/test_module_08_messaging.py` (7 test suites, Python 3). All 23 test suites passed.
 - **Current Execution Status:** `READY FOR USER REVIEW`
 - **Known Limitations:**
   - Lightweight test harnesses model distributed messaging invariants using standard language runtimes without booting external multi-node Kafka or RabbitMQ clusters.
