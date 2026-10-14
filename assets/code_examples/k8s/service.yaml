@@ -1,0 +1,27 @@
+# ==============================================================================
+# Module 13 — Production Kubernetes Service Specification
+#
+# Best practices demonstrated:
+# 1. ClusterIP internal service abstraction
+# 2. Port mapping (80 -> 8080)
+# 3. Explicit label selector matching Deployment template labels
+# 4. Standard cloud-native metadata
+# ==============================================================================
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend-service
+  namespace: production
+  labels:
+    app.kubernetes.io/name: backend-service
+    app.kubernetes.io/part-of: beyondtheapi
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: backend-service
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+      protocol: TCP

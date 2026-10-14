@@ -23,7 +23,7 @@ This handbook rejects both approaches. Instead, every concept is taught from **f
 
 ## 2. Curriculum Architecture
 
-The handbook spans **14 sequential modules**, progressing from foundational algorithms through low-level systems, databases, frameworks, distributed messaging, system design, observability, and capstone resume defense:
+The handbook spans **13 sequential modules**, progressing from foundational algorithms through low-level systems, databases, frameworks, distributed messaging, system design, observability, testing, and production infrastructure:
 
 ```
 [01. Data Structures & Algorithms] (Authoritative Source: modules/module_01_dsa.md)
@@ -42,10 +42,10 @@ The handbook spans **14 sequential modules**, progressing from foundational algo
   ↓
 [10. Modern System Design & Scalability]
   ↓
-[11. Observability] ── [12. Testing & Debugging] ── [13. Containers & Deployment]
-  ↓
-[14. Capstone Architecture & Resume Defense]
+[11. Observability] ── [12. Testing & Debugging] ── [13. Linux, Containers, Deployment & Infrastructure]
 ```
+
+*(Note: The foundational handbook curriculum concludes with Module 13. Project architecture and resume defense belong to a separate, subsequent curriculum created later.)*
 
 See [CURRICULUM_MASTER.md](file:///Users/mohammedaafaqahmed/Desktop/BeyondTheApi/CURRICULUM_MASTER.md) for detailed descriptions, technology mappings, and dependency rules.
 
@@ -56,7 +56,7 @@ See [CURRICULUM_MASTER.md](file:///Users/mohammedaafaqahmed/Desktop/BeyondTheApi
 ```
 .
 ├── README.md                          # Project overview and instructions
-├── CURRICULUM_MASTER.md               # 14-module sequence & governance principles
+├── CURRICULUM_MASTER.md               # 13-module sequence & governance principles
 ├── RESUME_TECHNOLOGY_INVENTORY.md     # Verified vs claimed tech inventory
 ├── CONTENT_STANDARDS.md               # Pedagogical & technical quality standards
 ├── PDF_SPECIFICATION.md               # Typesetting and PDF compilation rules

@@ -16,7 +16,7 @@ MODULES_DIR = REPO_ROOT / "modules"
 DIST_DIR = REPO_ROOT / "dist"
 DRAFTS_DIR = DIST_DIR / "drafts"
 
-TOTAL_MODULES_COUNT = 14
+TOTAL_MODULES_COUNT = 13
 
 def check_render_tools() -> dict[str, bool]:
     """Check availability of external PDF rendering tools without auto-installing."""
@@ -141,7 +141,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="FAANG Engineering Handbook Build System")
     parser.add_argument("--check-deps", action="store_true", help="Check installed PDF compilation tools")
     parser.add_argument("--draft", type=str, help="Render a draft preview of a specific module (e.g., module_01_dsa)")
-    parser.add_argument("--build-all", action="store_true", help="Attempt consolidated handbook build (Requires all 14 modules)")
+    parser.add_argument("--build-all", action="store_true", help="Attempt consolidated handbook build (Requires all 13 modules)")
     
     args = parser.parse_args()
     
@@ -184,7 +184,7 @@ def main() -> int:
             print("    python3 scripts/build_handbook.py --draft module_01_dsa\n")
             return 1
             
-        print("[INFO] All 14 modules detected. Proceeding to compilation...")
+        print("[INFO] All 13 modules detected. Proceeding to compilation...")
         # Full compilation logic to be activated upon completion of all modules
         return 0
 

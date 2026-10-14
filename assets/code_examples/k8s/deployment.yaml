@@ -1,0 +1,108 @@
+# ==============================================================================
+# Module 13 — Production Kubernetes Deployment Specification
+#
+# Best practices demonstrated:
+# 1. RollingUpdate strategy with maxSurge & maxUnavailable
+# 2. Independent Startup, Readiness, and Liveness probes
+# 3. Explicit CPU & Memory Requests and Limits
+# 4. Strict Security Context (non-root UID 10001, read-only root filesystem)
+# 5. Pod anti-affinity across availability zones
+# 6. Graceful termination period (30s) allowing endpoint drain
+# ==============================================================================
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend-service
+  namespace: production
+  labels:
+    app.kubernetes.io/name: backend-service
+    app.kubernetes.io/part-of: beyondtheapi
+    app.kubernetes.io/version: "1.0.0"
+spec:
+  replicas: 3
+  revisionHistoryLimit: 5
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: backend-service
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: backend-service
+        app.kubernetes.io/part-of: beyondtheapi
+    spec:
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: app.kubernetes.io/name
+                      operator: In
+                      values:
+                        - backend-service
+                topologyKey: topology.kubernetes.io/zone
+      containers:
+        - name: backend-service
+          image: beyondtheapi/backend-service:1.0.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+              name: http
+              protocol: TCP
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            requests:
+              cpu: 500m
+              memory: 512Mi
+            limits:
+              cpu: 2000m
+              memory: 1024Mi
+          # Startup Probe: Protects JVM initial classloading and framework initialization
+          startupProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            failureThreshold: 20 # Allows up to 100s for cold startup
+          # Liveness Probe: Checks if JVM is deadlocked (MUST NOT check external DB!)
+          livenessProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: 8080
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          # Readiness Probe: Checks if Pod is ready to receive traffic (validates DB pool)
+          readinessProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: 8080
+            periodSeconds: 5
+            timeoutSeconds: 2
+            successThreshold: 1
+            failureThreshold: 2
+          volumeMounts:
+            - name: tmp-volume
+              mountPath: /tmp
+      volumes:
+        - name: tmp-volume
+          emptyDir: {}

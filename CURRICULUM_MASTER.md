@@ -4,7 +4,7 @@
 
 The *FAANG Engineering Handbook* curriculum is designed to guide a graduating Computer Science engineer (B.Tech fresher) from foundational computer science theory to production-grade distributed backend engineering and confident resume defense in FAANG and tier-1 tech interviews.
 
-The curriculum is structured into **14 sequential modules**, where each module builds directly upon the mental models, invariants, and implementation patterns established in preceding modules.
+The curriculum is structured into **13 sequential modules** (with project architecture and resume defense belonging to a separate curriculum created later), where each module builds directly upon the mental models, invariants, and implementation patterns established in preceding modules.
 
 ---
 
@@ -27,7 +27,7 @@ The development, authoring, and review of this curriculum are strictly governed 
 
 ## 3. Approved Module Sequence and Technology Mapping
 
-The table below specifies the 14 modules, their target domains, the technologies covered, and their verification status (classified as: *Verified from resume*, *Verified from project documentation*, *Supplied in working context but not yet verified against resume*, *Supporting prerequisite*, or *Optional extension*).
+The table below specifies the 13 modules, their target domains, the technologies covered, and their verification status (classified as: *Verified from resume*, *Verified from project documentation*, *Supplied in working context but not yet verified against resume*, *Supporting prerequisite*, or *Optional extension*).
 
 | Mod # | Module Title | Primary Subjects & Competencies | Technologies Covered | Verification Classification | Prerequisite Modules |
 | :---: | :--- | :--- | :--- | :--- | :--- |
@@ -43,8 +43,9 @@ The table below specifies the 14 modules, their target domains, the technologies
 | **10** | **System Design and Production Architecture** | High-level system design methodology, Back-of-the-envelope capacity estimations, Load balancing algorithms (L4 vs L7), Database horizontal scaling (Read Replicas, Sharding strategies, Consistent Hashing), Microservices vs Monolith trade-offs, Real-world designs (URL Shortener, Rate Limiter, News Feed, Payment Processing). | Nginx / Envoy, HAProxy, Sharding algorithms, Consistent Hashing | Supporting prerequisite | Modules 4-9 |
 | **11** | **Observability and Production Diagnostics** | The Three Pillars of Observability (Metrics, Logs, Traces), Distributed tracing mechanics (W3C Trace Context propagation, Spans, Tracestate), Log aggregation & structured logging (JSON, MDC), Metric aggregation (Counters, Gauges, Histograms, Percentiles p50/p95/p99), OpenTelemetry instrumentation, Health checks. | OpenTelemetry SDK, Prometheus, Grafana, Micrometer, Logback / SLF4J | Supplied in working context but not yet verified against resume | Module 5, Module 6 |
 | **12** | **Debugging and Testing** | The Testing Pyramid (Unit, Integration, Contract, E2E), Test-Driven Development (TDD) principles, Mocking frameworks and boundaries, In-memory vs Containerized test fixtures (Testcontainers), Thread dumps analysis, Heap dumps & memory leak diagnosis with Eclipse Memory Analyzer (MAT), Profiling CPU hotspots with async-profiler. | JUnit 5, Mockito, Testcontainers, JConsole, VisualVM, async-profiler | Supporting prerequisite | Module 3, Module 5 |
-| **13** | **Containers, Deployment, and Infrastructure** | Linux cgroups and namespaces, Container vs VM architecture, Multi-stage Dockerfile optimization, Layer caching, Non-root security best practices, Docker Compose local service orchestration, Basic CI/CD pipeline stages (Lint, Test, Build, Scan, Deploy), Cloud deployment basics (12-Factor App methodology). | Docker, Docker Compose, Linux namespaces/cgroups, GitHub Actions | Supplied in working context but not yet verified against resume | Module 2, Module 5 |
-| **14** | **Project Architecture and Resume Defense** | Deep technical defense of candidate's capstone backend projects, Architectural justification for database, framework, and caching choices, Production failure modes and live debugging war stories, Handling architectural pushback, Responding to "Why didn't you use X instead?" questions. | Candidate's verified portfolio technologies | To be verified upon resume inspection | Modules 1-13 |
+| **13** | **Linux, Containers, Deployment & Infrastructure** | Linux kernel primitives, system calls, shell engineering, process lifecycle and signals, cgroups v2, namespaces, virtual memory, disk/inode diagnostics, Linux networking, systemd, SSH, incident labs, multi-stage Dockerfiles, Docker Compose, Kubernetes control plane, Pods, Deployments, Services, ConfigMaps, Secrets, resource requests/limits, HPA, Probes, rollout strategies, CI/CD pipelines, expand-and-contract migrations, cloud networking and blast-radius resilience. | Linux (POSIX/GNU), Bash, Docker, Docker Compose, Kubernetes, Nginx, GitHub Actions | Supplied in working context | Module 2, Module 5 |
+
+*(Note: The handbook curriculum concludes with Module 13. Project architecture and resume defense will belong to a separate, independent curriculum created later.)*
 
 ---
 
@@ -73,11 +74,7 @@ The table below specifies the 14 modules, their target domains, the technologies
                                       |
            +--------------------------+--------------------------+
            |                          |                          |
-   [11: Observability]      [12: Testing & Debugging]  [13: Docker & Infra]
-           |                          |                          |
-           +--------------------------+--------------------------+
-                                      |
-                    [14: Project Architecture & Defense]
+   [11: Observability]      [12: Testing & Debugging]  [13: Linux, Containers & Infra]
 ```
 
-Each module is unlocked only when all its upstream dependencies are authored, self-checked, audited via QA, and approved by the user.
+Each module is unlocked only when all its upstream dependencies are authored, self-checked, audited via QA, and approved by the user. Module 13 completes the foundational 13-module handbook curriculum.

@@ -2,7 +2,7 @@
 
 ## 1. Overview and Tracking Rules
 
-This central ledger records the technical quality, code verification, completeness, and approval status of every module across the 14-module curriculum.
+This central ledger records the technical quality, code verification, completeness, and approval status of every module across the 13-module curriculum.
 
 ### Status Definitions
 - `NOT STARTED`: Work has not commenced.
@@ -29,8 +29,9 @@ This central ledger records the technical quality, code verification, completene
 | **10** | **System Design and Production Architecture** | `modules/module_10_system_design_production_architecture.md` | 31 / 31 | Verified (14/14 test suites passed in JDK 21, Node v24, Python 3) | Passed (`scripts/validate_handbook.py`) | `reviews/module_10_qa.md` | **READY FOR USER REVIEW** | Pending Final Report |
 | **11** | **Observability and Production Diagnostics** | `modules/module_11_observability.md` | 28 / 28 | Verified (14/14 test suites passed in JDK 21, Node v24, Python 3) | Passed (`scripts/validate_handbook.py`) | `reviews/module_11_qa.md` | **READY FOR USER REVIEW** | Pending Final Report |
 | **12** | **Debugging and Testing** | `modules/module_12_debugging_testing.md` | 36 / 36 | Verified (14/14 test suites passed in JDK 21, Node v24, Python 3) | Passed (`scripts/validate_handbook.py`) | `reviews/module_12_qa.md` | **READY FOR USER REVIEW** | Pending Final Report |
-| **13** | Containers, Deployment, and Infrastructure | `modules/module_13_containers_infra.md` | TBD | Pending | Pending | Pending | `NOT STARTED` | Pending |
-| **14** | Project Architecture and Resume Defense | `modules/module_14_project_defense.md` | TBD | Pending | Pending | Pending | `NOT STARTED` | Pending |
+| **13** | **Linux, Containers, Deployment & Infrastructure** | `modules/module_13_linux_containers_deployment_infrastructure.md` | 42 / 42 | Verified (14/14 test suites passed in JDK 21, Node v24, Python 3, Bash) | Passed (`scripts/validate_handbook.py`) | `reviews/module_13_qa.md` | **READY FOR USER REVIEW** | Pending Final Report |
+
+*(Note: The foundational handbook curriculum concludes with Module 13. Project architecture and resume defense will belong to a separate, independent curriculum created later.)*
 
 ---
 
@@ -68,7 +69,7 @@ This central ledger records the technical quality, code verification, completene
 - **Human Approval Date:** 2026-10-13 (Explicit User Approval)
 - **Known Limitations:**
   - Full candidate physical resume document is pending ingestion; inventory relies on prompt context.
-  - Final consolidated PDF compilation deferred until all 14 modules are completed; individual draft HTML preview available via `python3 scripts/build_handbook.py --draft module_01_dsa`.
+  - Final consolidated PDF compilation deferred until all 13 modules are completed; individual draft HTML preview available via `python3 scripts/build_handbook.py --draft module_01_dsa`.
 - **External Review Status:** Approved by Human Reviewer.
 
 ---
@@ -500,5 +501,65 @@ This central ledger records the technical quality, code verification, completene
 - **Current Execution Status:** `READY FOR USER REVIEW`
 - **Known Limitations:**
   - Standalone verification harnesses execute test doubles, concurrency barriers, clock injection, mutation scoring, and property shrinking without requiring live external Docker daemons, Testcontainers clusters, or remote CI infrastructure on local host.
-  - Containerization, Docker, Kubernetes, and deployment infrastructure deferred to Module 13.
+  - Containerization, Docker, Kubernetes, and deployment infrastructure covered in Module 13.
 - **External Review Status:** Source Markdown, QA audit report, Java, Node, and Python test harnesses ready for final inspection.
+
+---
+
+## 15. Module 13 Deep-Dive Status Card
+
+- **Module Identifier:** `MOD-13-LINUX-CONTAINERS`
+- **Module Title:** Linux, Containers, Deployment & Infrastructure — Systems Engineering, Container Orchestration, and Production Operations
+- **Authoritative Source File:** [module_13_linux_containers_deployment_infrastructure.md](file:///Users/mohammedaafaqahmed/Desktop/BeyondTheApi/modules/module_13_linux_containers_deployment_infrastructure.md)
+- **QA Audit File:** [reviews/module_13_qa.md](file:///Users/mohammedaafaqahmed/Desktop/BeyondTheApi/reviews/module_13_qa.md)
+- **Target Frameworks / Tools:** Linux (GNU/POSIX), OpenJDK 21 LTS, Node.js v24.x, Docker, Docker Compose, Kubernetes manifests, Bash ops CLI, Python 3.14+
+- **Section Scope (42 Sections):**
+  1. Linux's Role in Backend Engineering — *Completed*
+  2. Filesystem Hierarchy and Navigation — *Completed*
+  3. Essential Command-Line Engineering — *Completed*
+  4. Bash and Shell Scripting — *Completed*
+  5. Users, Groups, Permissions, and Security — *Completed*
+  6. Processes, Threads, Signals, and Job Control — *Completed*
+  7. CPU and Scheduling Diagnosis — *Completed*
+  8. Memory, Swap, and OOM Diagnosis — *Completed*
+  9. Disk, Filesystems, and Storage — *Completed*
+  10. Linux Networking Fundamentals — *Completed*
+  11. Logs, systemd, and Service Management — *Completed*
+  12. Advanced Linux Troubleshooting Tools — *Completed*
+  13. SSH and Remote Administration — *Completed*
+  14. Linux Production Incident Lab — *Completed*
+  15. Virtual Machines Versus Containers — *Completed*
+  16. Docker Architecture and Core Concepts — *Completed*
+  17. Writing Production-Appropriate Dockerfiles — *Completed*
+  18. Container Filesystems, Volumes, and Persistence — *Completed*
+  19. Docker Networking — *Completed*
+  20. Docker Compose and Multi-Service Applications — *Completed*
+  21. Container Resources and Lifecycle — *Completed*
+  22. Container Security and Operations — *Completed*
+  23. Kubernetes Architecture — *Completed*
+  24. Workloads and Deployment Objects — *Completed*
+  25. Services and Networking — *Completed*
+  26. Configuration and Secrets — *Completed*
+  27. Requests, Limits, and Scheduling — *Completed*
+  28. Probes, Rollouts, and Availability — *Completed*
+  29. Kubernetes Troubleshooting Lab — *Completed*
+  30. Environments and Configuration — *Completed*
+  31. Reverse Proxies, TLS, and Traffic Routing — *Completed*
+  32. CI/CD and Automated Delivery — *Completed*
+  33. Deployment Strategies and Database Changes — *Completed*
+  34. Cloud and Infrastructure Fundamentals — *Completed*
+  35. Reliability, Recovery, and Production Operations — *Completed*
+  36. Lab 1: Diagnose a Linux Service — *Completed*
+  37. Lab 2: Containerize a Backend Application — *Completed*
+  38. Lab 3: Run a Multi-Service Stack — *Completed*
+  39. Lab 4: Kubernetes Deployment Walkthrough — *Completed*
+  40. Lab 5: Production Deployment Incident — *Completed*
+  41. Interview Questions and Scenario-Based Exercises — *Completed*
+  42. Module 13 Cheatsheet: Linux, Containers & Infrastructure — *Completed*
+- **Code Verification:** Standalone verification harnesses in `assets/code_examples/Module13InfraExamples.java` (5 test suites, OpenJDK 21 LTS), `assets/code_examples/module_13_node_infra_examples.js` (3 test suites, Node.js v24), `assets/code_examples/module_13_ops_tool.sh` (self-test verified), `scripts/test_module_13_infra.py` (5 test suites, Python 3), multi-stage Dockerfile and Docker Compose stack, and cloud-native Kubernetes manifests. All 14 test suites passed.
+- **Current Execution Status:** `READY FOR USER REVIEW`
+- **Known Limitations:**
+  - Standalone verification harnesses execute cgroups calculations, process lifecycle signals, graceful HTTP shutdown, probe state machines, and HPA autoscaling math natively on host.
+  - Multi-stage Dockerfile, Docker Compose stack, and Kubernetes manifests are rigorously verified via static AST/linter analyzers; live container execution and cluster deployment were not performed on local host due to absence of live daemon/cluster.
+  - The foundational 13-module handbook curriculum concludes with Module 13; project architecture and resume defense belong to a separate curriculum created later.
+- **External Review Status:** Source Markdown, QA audit report, Java, Node, Bash, Docker, Kubernetes, and Python test harnesses ready for final inspection.
