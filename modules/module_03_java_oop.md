@@ -1269,27 +1269,3 @@ It guarantees nothing. It is merely a non-binding hint to the JVM that the appli
 8. **"Abstract classes cannot have constructors."** False: Abstract classes have constructors invoked via `super()`.
 9. **"`String s = new String(\"a\")` uses only the String Pool."** False: It explicitly allocates a redundant heap object.
 10. **"Catching `Exception` is good practice."** False: It swallows runtime bugs and masks critical failures.
-
----
-
-## Revision and Verification Checklist
-- [x] All 17 required curriculum sections present and fully articulated.
-- [x] Section 17 Java and OOP Cheatsheet included as the comprehensive, self-contained final revision artifact.
-- [x] Detailed trace of Java execution from `.java` to native machine code via C1/C2 JIT.
-- [x] Explicit proof that Java is 100% pass-by-value with aliasing diagrams.
-- [x] Deterministic 6-step initialization order trace with code verification.
-- [x] Clear differentiation of overloading (compile-time) vs overriding (runtime) vs static hiding vs field hiding.
-- [x] The four OOP principles analyzed with backend examples, overuse risks, and traps.
-- [x] Interface default method conflict resolution rules documented.
-- [x] Inheritance vs composition analyzed with the Fragile Base Class problem.
-- [x] SOLID principles explained with concrete architectural examples.
-- [x] `equals()` and `hashCode()` contracts detailed with the mutable key silent failure mode.
-- [x] Defensive copying and 5 immutability rules established.
-- [x] Generics type erasure, invariance, and the PECS principle formalized.
-- [x] Exception hierarchy, `try-with-resources`, and suppressed exceptions explained.
-- [x] Collections framework selection guide and fail-fast `modCount` mechanics detailed.
-- [x] Streams laziness, short-circuiting, and `map` vs `flatMap` demonstrated.
-- [x] Modern Java features (Records, Sealed Classes, Pattern Matching) version-labeled.
-- [x] JVM memory architecture (Heap, Metaspace, Stacks) and GC root reachability analyzed.
-- [x] 10 high-value interview questions with deep, mechanism-level answers.
-- [x] Zero placeholder tokens or superficial summaries.

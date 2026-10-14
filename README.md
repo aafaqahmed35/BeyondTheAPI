@@ -106,7 +106,7 @@ python3 scripts/validate_handbook.py
 To compile and test the standalone algorithmic implementations:
 ```bash
 javac -Werror assets/code_examples/*.java
-java -ea -cp assets/code_examples Module01CodeExamples
+java -ea -cp . assets.code_examples.Module01CodeExamples
 ```
 
 ### Building Publication Artifacts

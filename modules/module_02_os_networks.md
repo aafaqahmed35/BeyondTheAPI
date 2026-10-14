@@ -1269,25 +1269,3 @@ To prevent retry storms:
 8. **"Asynchronous I/O and Non-blocking I/O are the same thing."** False: non-blocking returns immediately and requires the application to poll or read; asynchronous delegates both the wait and the data transfer to the kernel.
 9. **"Immediate retries solve intermittent network failures."** False: immediate retries trigger retry storms that overwhelm struggling downstream services. Retries require idempotency, exponential backoff, and full jitter.
 10. **"`wait()` can be safely called inside an `if` block."** False: spurious wakeups mean threads can wake without a signal; `wait()` must always be enclosed in a `while (!condition)` loop.
-
----
-
-## Revision and Verification Checklist
-- [x] All 13 required curriculum sections present and fully articulated.
-- [x] Section 13 OS and Computer Networks Cheatsheet included as the comprehensive, self-contained final revision artifact.
-- [x] System call trap mechanics and CPU privilege ring transitions explained.
-- [x] Process address space layout and thread execution model compared.
-- [x] Worked CPU scheduling trace with exact turnaround and waiting time derivations.
-- [x] Concrete assembly decomposition of `count++` illustrating race conditions.
-- [x] The four Coffman conditions for deadlock defined with lock-ordering prevention strategies.
-- [x] Virtual memory translation via multi-level page tables and TLB detailed.
-- [x] Three classes of page faults (minor, major, invalid) accurately distinguished.
-- [x] File descriptors, Open File Table, and the spectrum of I/O paradigms compared.
-- [x] TCP 3-way handshake, 4-way teardown, `TIME_WAIT` state, and flow/congestion control deconstructed.
-- [x] Why TCP does not preserve message boundaries explained with length-prefix framing solutions.
-- [x] DNS resolution hierarchy, HTTP/1.1 vs 2 vs 3, and TLS 1.3 1-RTT handshake explained.
-- [x] Latency components, timeout types, and retry storm mitigations detailed.
-- [x] Diagnostic tool matrix comparing macOS and Linux implementations (`curl`, `dig`, `lsof`, `ss`/`netstat`, `ping`).
-- [x] Comprehensive end-to-end trace from URL resolution to response delivery.
-- [x] 15 interview questions with mechanism-level model answers.
-- [x] Zero placeholder tokens or superficial outlines.
