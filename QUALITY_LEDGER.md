@@ -28,7 +28,7 @@ This central ledger records the technical quality, code verification, completene
 | **09** | **Concurrency and Distributed Systems** | `modules/module_09_concurrency_distributed_systems.md` | 27 / 27 | Verified (19/19 test suites passed in JDK 21, Node v24, Python 3) | Passed (`scripts/validate_handbook.py`) | `reviews/module_09_qa.md` | **READY FOR USER REVIEW** | Pending Final Report |
 | **10** | **System Design and Production Architecture** | `modules/module_10_system_design_production_architecture.md` | 31 / 31 | Verified (14/14 test suites passed in JDK 21, Node v24, Python 3) | Passed (`scripts/validate_handbook.py`) | `reviews/module_10_qa.md` | **READY FOR USER REVIEW** | Pending Final Report |
 | **11** | **Observability and Production Diagnostics** | `modules/module_11_observability.md` | 28 / 28 | Verified (14/14 test suites passed in JDK 21, Node v24, Python 3) | Passed (`scripts/validate_handbook.py`) | `reviews/module_11_qa.md` | **READY FOR USER REVIEW** | Pending Final Report |
-| **12** | Debugging and Testing | `modules/module_12_debugging_testing.md` | TBD | Pending | Pending | Pending | `NOT STARTED` | Pending |
+| **12** | **Debugging and Testing** | `modules/module_12_debugging_testing.md` | 36 / 36 | Verified (14/14 test suites passed in JDK 21, Node v24, Python 3) | Passed (`scripts/validate_handbook.py`) | `reviews/module_12_qa.md` | **READY FOR USER REVIEW** | Pending Final Report |
 | **13** | Containers, Deployment, and Infrastructure | `modules/module_13_containers_infra.md` | TBD | Pending | Pending | Pending | `NOT STARTED` | Pending |
 | **14** | Project Architecture and Resume Defense | `modules/module_14_project_defense.md` | TBD | Pending | Pending | Pending | `NOT STARTED` | Pending |
 
@@ -448,4 +448,57 @@ This central ledger records the technical quality, code verification, completene
   - Lightweight test harnesses model W3C trace context, in-memory spans, histogram quantiles, structured logging, PII masking, and burn-rate alerts using local language runtimes without deploying live multi-region OpenTelemetry Collector clusters or enterprise time-series backends.
   - Project *ArgusIQ* is classified as `PRODUCTION-UNVERIFIED`; verified algorithmic critical-path logic is distinguished from hypothetical enterprise deployments.
   - Testing methodologies and the Testing Pyramid deferred to Module 12; containerization and infrastructure to Module 13.
+- **External Review Status:** Source Markdown, QA audit report, Java, Node, and Python test harnesses ready for final inspection.
+
+---
+
+## 14. Module 12 Deep-Dive Status Card
+
+- **Module Identifier:** `MOD-12-DEBUG-TEST`
+- **Module Title:** Debugging & Testing — Engineering Confidence, Defect Isolation, and Production Diagnostics
+- **Authoritative Source File:** [module_12_debugging_testing.md](file:///Users/mohammedaafaqahmed/Desktop/BeyondTheApi/modules/module_12_debugging_testing.md)
+- **QA Audit File:** [reviews/module_12_qa.md](file:///Users/mohammedaafaqahmed/Desktop/BeyondTheApi/reviews/module_12_qa.md)
+- **Target Frameworks / Runtimes:** OpenJDK 21 LTS (JUnit 5 conventions, Test Doubles, CyclicBarrier concurrency, Clock injection, Mutation engine, Property fuzzing), Node.js v24.x (Async retries, Idempotent consumer, RFC 7807 contracts, Listener disposal), Python 3.14+ (Flaky compounding math, Mutation score disconnect, Performance curves, Property shrinking, Little's Law pool exhaustion)
+- **Section Scope (36 Sections):**
+  1. Why Testing Exists: Risk Reduction, Feedback Speed, and Confidence — *Completed*
+  2. Test Levels and the Testing Pyramid: Unit, Integration, Component, Contract, End-to-End — *Completed*
+  3. Test Strategy Based on Risk, Boundaries, and Failure Impact — *Completed*
+  4. Testability, Dependency Boundaries, and Separation of Concerns — *Completed*
+  5. Unit-Testing Principles and Deterministic Test Design — *Completed*
+  6. Java Testing with JUnit 5 and Established Repository Conventions — *Completed*
+  7. Assertions, Test Fixtures, Setup/Teardown, Parameterized Tests, and Test Naming — *Completed*
+  8. Mocking, Stubbing, Fakes, Spies, and When Not to Mock — *Completed*
+  9. Testing Spring Boot Services, Controllers, Repositories, and Application Boundaries — *Completed*
+  10. Testing Node.js Services and Asynchronous Code — *Completed*
+  11. Database Integration Tests, Transaction Behavior, Isolation, and Test Data — *Completed*
+  12. Testing Redis, Caching, and Invalidation Behavior — *Completed*
+  13. Testing APIs: Status Codes, Validation, Authorization, Error Contracts, and Compatibility — *Completed*
+  14. Contract Testing and Compatibility Across Service Boundaries — *Completed*
+  15. Testing Asynchronous Consumers, Retries, Idempotency, and Duplicate Delivery — *Completed*
+  16. Concurrency Tests, Race Conditions, Deadlocks, and Nondeterminism — *Completed*
+  17. Property-Based Testing, Invariants, Boundary Testing, and Fuzzing Concepts — *Completed*
+  18. Regression Testing and Reproducing Reported Defects — *Completed*
+  19. Debugging Fundamentals: Observe, Hypothesize, Isolate, Verify — *Completed*
+  20. A Repeatable Debugging Workflow for Unfamiliar Codebases — *Completed*
+  21. Reading Stack Traces, Exception Chains, Logs, Metrics, and Traces — *Completed*
+  22. Breakpoints, Stepping, Watches, Conditional Breakpoints, and Debugger Pitfalls — *Completed*
+  23. Heap, CPU, Thread, and Allocation Profiling Fundamentals — *Completed*
+  24. Memory Leaks, Resource Leaks, Connection-Pool Exhaustion, and Thread Starvation — *Completed*
+  25. Performance Testing: Load, Stress, Spike, Soak, and Capacity Testing — *Completed*
+  26. Benchmarking Pitfalls, Warm-Up, Variance, and Statistically Responsible Comparisons — *Completed*
+  27. Flaky Tests, Time-Dependent Behavior, Randomness, Shared State, and External Dependencies — *Completed*
+  28. Test Isolation, Parallel Execution, Test Containers, and Disposable Environments — *Completed*
+  29. CI Test Stages, Quality Gates, Test Selection, and Failure Triage — *Completed*
+  30. Coverage Metrics: What Line/Branch Coverage Reveals and What It Cannot Prove — *Completed*
+  31. Mutation Testing and the Limits of Coverage-Driven Optimization — *Completed*
+  32. Production Debugging, Safe Mitigation, Rollback, and Incident Follow-Up — *Completed*
+  33. Testing Security Boundaries and Failure Paths — *Completed*
+  34. Common Testing and Debugging Interview Questions — *Completed*
+  35. Scenario-Based Debugging Exercises with Worked Reasoning — *Completed*
+  36. Module 12 Cheatsheet: Debugging & Testing — *Completed*
+- **Code Verification:** Standalone verification harnesses in `assets/code_examples/Module12TestingExamples.java` (5 test suites, OpenJDK 21 LTS), `assets/code_examples/module_12_node_testing_examples.js` (4 test suites, Node.js v24), and `scripts/test_module_12_testing.py` (5 test suites, Python 3). All 14 test suites passed.
+- **Current Execution Status:** `READY FOR USER REVIEW`
+- **Known Limitations:**
+  - Standalone verification harnesses execute test doubles, concurrency barriers, clock injection, mutation scoring, and property shrinking without requiring live external Docker daemons, Testcontainers clusters, or remote CI infrastructure on local host.
+  - Containerization, Docker, Kubernetes, and deployment infrastructure deferred to Module 13.
 - **External Review Status:** Source Markdown, QA audit report, Java, Node, and Python test harnesses ready for final inspection.
