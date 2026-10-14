@@ -104,16 +104,27 @@ function validateUpdateUserPayload(rawInput) {
 // 2. Express-Style Security Middleware Pipeline (AuthN, RBAC, IDOR Defense)
 // =========================================================================
 
-const JWT_SECRET = 'node_jwt_test_secret_key_32_bytes_length!!';
+// Fail-safe configuration validation at startup
+const JWT_SECRET = process.env.JWT_SECRET || 'node_jwt_test_secret_key_32_bytes_length!!';
+if (!JWT_SECRET || typeof JWT_SECRET !== 'string' || JWT_SECRET.length < 32) {
+    throw new Error('FATAL: Missing or insecure JWT_SECRET configuration. Must be >= 32 chars.');
+}
 
 function createToken(payload) {
+    const defaultClaims = {
+        iss: 'https://auth.example.com',
+        aud: 'https://api.example.com',
+        exp: Math.floor(Date.now() / 1000) + 3600
+    };
+    const fullPayload = { ...defaultClaims, ...payload };
     const header = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
-    const body = Buffer.from(JSON.stringify(payload)).toString('base64url');
+    const body = Buffer.from(JSON.stringify(fullPayload)).toString('base64url');
     const signature = crypto.createHmac('sha256', JWT_SECRET).update(`${header}.${body}`).digest('base64url');
     return `${header}.${body}.${signature}`;
 }
 
 function verifyToken(token) {
+    if (typeof token !== 'string') return null;
     const parts = token.split('.');
     if (parts.length !== 3) return null;
     const [header, body, sig] = parts;
@@ -121,11 +132,30 @@ function verifyToken(token) {
     if (!crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expectedSig))) {
         return null; // Signature verification failed
     }
-    const payload = JSON.parse(Buffer.from(body, 'base64url').toString('utf-8'));
-    if (payload.exp && payload.exp < Math.floor(Date.now() / 1000)) {
-        return null; // Token expired
+    let payload;
+    try {
+        payload = JSON.parse(Buffer.from(body, 'base64url').toString('utf-8'));
+    } catch {
+        return null;
     }
-    return payload;
+    // Trust Boundary Claim Verification (sub, role, iss, aud, exp validation)
+    if (typeof payload !== 'object' || payload === null) return null;
+    if (typeof payload.sub !== 'string' || payload.sub.trim().length === 0) return null;
+    if (!Array.isArray(payload.roles) || payload.roles.length === 0) return null;
+    if (payload.iss !== 'https://auth.example.com') return null;
+    if (payload.aud !== 'https://api.example.com') return null;
+    if (typeof payload.exp !== 'number' || payload.exp < Math.floor(Date.now() / 1000)) {
+        return null; // Token expired or invalid expiration
+    }
+
+    return {
+        sub: payload.sub,
+        roles: payload.roles,
+        tenantId: payload.tenantId || 'tenant_default',
+        iss: payload.iss,
+        aud: payload.aud,
+        exp: payload.exp
+    };
 }
 
 // In-memory simulated database
@@ -161,7 +191,7 @@ function authenticate(req, res, next) {
     const token = authHeader.slice(7);
     const principal = verifyToken(token);
     if (!principal) {
-        return next({ status: 401, code: 'INVALID_TOKEN', message: 'Token is invalid or expired' });
+        return next({ status: 401, code: 'INVALID_TOKEN', message: 'Token is invalid, expired, or malformed' });
     }
     req.user = principal;
     next();
@@ -197,8 +227,8 @@ function authorizeDocumentOwnership(req, res, next) {
 (function testSecurityMiddlewarePipeline() {
     console.log('  [TEST 2] Express Security Middleware Pipeline & BOLA Defense...');
 
-    const aliceToken = createToken({ sub: 'user_alice', roles: ['USER'], exp: Math.floor(Date.now() / 1000) + 3600 });
-    const bobToken = createToken({ sub: 'user_bob', roles: ['USER'], exp: Math.floor(Date.now() / 1000) + 3600 });
+    const aliceToken = createToken({ sub: 'user_alice', roles: ['USER'] });
+    const bobToken = createToken({ sub: 'user_bob', roles: ['USER'] });
 
     const pipeline = [authenticate, authorizeDocumentOwnership];
     const handler = (req, res) => {
@@ -225,6 +255,13 @@ function authorizeDocumentOwnership(req, res, next) {
     const res3 = {};
     runMiddlewarePipeline(req3, res3, pipeline, handler);
     assert.strictEqual(res3.statusCode, 401);
+
+    // Case D: Invalid claims (e.g. wrong audience or missing sub) -> 401 Unauthorized
+    const invalidAudToken = createToken({ sub: 'user_alice', roles: ['USER'], aud: 'https://wrong-service.com' });
+    const req4 = { headers: { authorization: `Bearer ${invalidAudToken}` }, params: { id: 'doc_101' } };
+    const res4 = {};
+    runMiddlewarePipeline(req4, res4, pipeline, handler);
+    assert.strictEqual(res4.statusCode, 401);
 
     console.log('    -> Passed: 401, 403, and BOLA defense verified in middleware sequence.');
 })();
@@ -265,7 +302,7 @@ function authorizeDocumentOwnership(req, res, next) {
 })();
 
 // =========================================================================
-// 4. Sliding-Window Rate Limiter Logic
+// 4. Sliding-Window Rate Limiter Logic & Redis ZSET Collision Prevention
 // =========================================================================
 
 class SlidingWindowRateLimiter {
@@ -307,9 +344,55 @@ class SlidingWindowRateLimiter {
     }
 }
 
-(function testSlidingWindowRateLimiter() {
-    console.log('  [TEST 4] Sliding-Window Rate Limiter & HTTP 429 Invariants...');
+/**
+ * Emulates Redis Sorted Set (ZSET) behavior to demonstrate same-millisecond collision
+ * bug and verify the unique-member fix.
+ */
+class SimulatedRedisZsetRateLimiter {
+    constructor(maxRequests, windowMs) {
+        this.maxRequests = maxRequests;
+        this.windowMs = windowMs;
+        this.zsets = new Map(); // key -> Map(member -> score)
+    }
 
+    // Flawed implementation: uses timestamp alone as ZSET member
+    tryAcquireFlawed(key, now) {
+        if (!this.zsets.has(key)) this.zsets.set(key, new Map());
+        const zset = this.zsets.get(key);
+        const clearBefore = now - this.windowMs;
+        for (const [member, score] of zset.entries()) {
+            if (score <= clearBefore) zset.delete(member);
+        }
+        if (zset.size < this.maxRequests) {
+            // BUG: In Redis ZSET, members must be unique. Using timestamp alone causes collision!
+            zset.set(String(now), now);
+            return { allowed: true, count: zset.size };
+        }
+        return { allowed: false, count: zset.size };
+    }
+
+    // Fixed implementation: appends unique requestId / nonce to member
+    tryAcquireFixed(key, now, requestId) {
+        if (!this.zsets.has(key)) this.zsets.set(key, new Map());
+        const zset = this.zsets.get(key);
+        const clearBefore = now - this.windowMs;
+        for (const [member, score] of zset.entries()) {
+            if (score <= clearBefore) zset.delete(member);
+        }
+        if (zset.size < this.maxRequests) {
+            // FIX: Unique member `now:requestId` guarantees distinct entries per request
+            const member = `${now}:${requestId}`;
+            zset.set(member, now);
+            return { allowed: true, count: zset.size };
+        }
+        return { allowed: false, count: zset.size };
+    }
+}
+
+(function testSlidingWindowRateLimiter() {
+    console.log('  [TEST 4] Sliding-Window Rate Limiter & Redis ZSET Collision Invariants...');
+
+    // 1. In-memory sliding log verification
     const limiter = new SlidingWindowRateLimiter(3, 1000); // 3 requests per 1000ms
     const clientId = 'ip_198.51.100.42';
     const baseTime = 100000;
@@ -329,19 +412,41 @@ class SlidingWindowRateLimiter {
     const allowedLater = limiter.tryAcquire(clientId, baseTime + 1050);
     assert.strictEqual(allowedLater.allowed, true, 'Window slide should evict oldest request');
 
-    console.log('    -> Passed: Sliding window prevents boundary bursting and calculates Retry-After.');
+    // 2. Redis ZSET Same-Millisecond Member Collision Verification
+    const redisLimiter = new SimulatedRedisZsetRateLimiter(2, 1000); // Limit 2 requests
+    const redisKey = 'rate:user_42';
+    const sameMsTime = 200000;
+
+    // Flawed limiter: 3 requests at the exact same millisecond all pass because members collide!
+    const f1 = redisLimiter.tryAcquireFlawed(redisKey, sameMsTime);
+    const f2 = redisLimiter.tryAcquireFlawed(redisKey, sameMsTime);
+    const f3 = redisLimiter.tryAcquireFlawed(redisKey, sameMsTime);
+    assert.strictEqual(f1.allowed, true);
+    assert.strictEqual(f2.allowed, true);
+    assert.strictEqual(f3.allowed, true, 'Flawed limiter permits burst bypass due to ZSET member overwrite');
+
+    // Fixed limiter: each request receives unique member (now:requestId)
+    const fixedKey = 'rate:user_fixed_42';
+    const r1 = redisLimiter.tryAcquireFixed(fixedKey, sameMsTime, 'req_001');
+    const r2 = redisLimiter.tryAcquireFixed(fixedKey, sameMsTime, 'req_002');
+    const r3 = redisLimiter.tryAcquireFixed(fixedKey, sameMsTime, 'req_003');
+    assert.strictEqual(r1.allowed, true, 'Request 1 allowed');
+    assert.strictEqual(r2.allowed, true, 'Request 2 allowed (hits limit)');
+    assert.strictEqual(r3.allowed, false, 'Request 3 correctly rejected: unique member prevented collision');
+
+    console.log('    -> Passed: Sliding window and Redis ZSET collision fix verified.');
 })();
 
 // =========================================================================
-// 5. Concurrent Idempotency Key Locking & Deduplication
+// 5. Concurrent Idempotency Key Locking, Durable Failures & Deduplication
 // =========================================================================
 
 class AsyncIdempotencyCoordinator {
     constructor() {
-        this.cache = new Map(); // key -> { status: 'PENDING'|'DONE', result: any }
+        this.cache = new Map(); // key -> { status: 'PENDING'|'DONE'|'RECONCILIATION_REQUIRED', result: any }
     }
 
-    async process(key, workerFn) {
+    async process(key, workerFn, options = { hasExternalSideEffects: false }) {
         const existing = this.cache.get(key);
         if (existing) {
             if (existing.status === 'PENDING') {
@@ -350,24 +455,38 @@ class AsyncIdempotencyCoordinator {
             if (existing.status === 'DONE') {
                 return { status: 200, body: existing.result, replayed: true };
             }
+            if (existing.status === 'RECONCILIATION_REQUIRED') {
+                return { status: 409, body: { error: 'TRANSACTION_PENDING_RECONCILIATION', downstreamKey: existing.downstreamKey }, replayed: false };
+            }
         }
 
-        // Reserve key atomically
-        this.cache.set(key, { status: 'PENDING' });
+        // Reserve key atomically with creation timestamp
+        this.cache.set(key, { status: 'PENDING', createdAt: Date.now() });
 
         try {
             const result = await workerFn();
             this.cache.set(key, { status: 'DONE', result });
             return { status: 200, body: result, replayed: false };
         } catch (err) {
-            this.cache.delete(key); // Release key on error so client can retry
+            if (options.hasExternalSideEffects) {
+                // When external side-effects (payment dispatch, RPCs) might have occurred,
+                // do NOT delete the in-progress reservation! Retain for reconciliation.
+                this.cache.set(key, {
+                    status: 'RECONCILIATION_REQUIRED',
+                    error: err.message,
+                    downstreamKey: `ext_prov_${key}`
+                });
+            } else {
+                // Purely local failure before external side-effects: safe to release key
+                this.cache.delete(key);
+            }
             throw err;
         }
     }
 }
 
 (async function testConcurrentIdempotency() {
-    console.log('  [TEST 5] Concurrent Idempotency Locking & Replay Deduplication...');
+    console.log('  [TEST 5] Concurrent Idempotency Locking & Durable Reconciliation...');
 
     const coordinator = new AsyncIdempotencyCoordinator();
     let counter = 0;
@@ -378,7 +497,7 @@ class AsyncIdempotencyCoordinator {
 
     const key = 'idem_txn_abc_123';
 
-    // Fire 2 concurrent requests with the identical idempotency key
+    // 1. Fire 2 concurrent requests with the identical idempotency key
     const p1 = coordinator.process(key, slowOperation);
     const p2 = coordinator.process(key, slowOperation);
 
@@ -392,13 +511,32 @@ class AsyncIdempotencyCoordinator {
     assert(has409, 'Concurrent duplicate request must receive 409 Conflict');
     assert.strictEqual(counter, 1, 'Underlying payment operation must execute only once!');
 
-    // Sequential subsequent request: Replays cached result
+    // 2. Sequential subsequent request: Replays cached result
     const res3 = await coordinator.process(key, slowOperation);
     assert.strictEqual(res3.status, 200);
     assert.strictEqual(res3.replayed, true, 'Subsequent call must return replayed cached response');
     assert.strictEqual(res3.body.orderId, 'ord_999');
     assert.strictEqual(counter, 1, 'Counter remained at 1 across all calls');
 
-    console.log('    -> Passed: Concurrency lock prevents double-spend race condition.');
+    // 3. Ambiguous failure with external side effects: Key must NOT be deleted
+    const failKey = 'idem_txn_external_timeout_456';
+    const failingExternalOp = () => new Promise((_, reject) => {
+        setTimeout(() => reject(new Error('Gateway read timeout after payment dispatch')), 10);
+    });
+
+    try {
+        await coordinator.process(failKey, failingExternalOp, { hasExternalSideEffects: true });
+        assert.fail('Expected operation to throw');
+    } catch (e) {
+        assert(e.message.includes('Gateway read timeout'));
+    }
+
+    // Subsequent client retry must receive RECONCILIATION_REQUIRED, preventing double-charge
+    const retryRes = await coordinator.process(failKey, slowOperation);
+    assert.strictEqual(retryRes.status, 409);
+    assert.strictEqual(retryRes.body.error, 'TRANSACTION_PENDING_RECONCILIATION');
+    assert(retryRes.body.downstreamKey.includes(failKey));
+
+    console.log('    -> Passed: Concurrency lock, cached replay, and durable reconciliation verified.');
     console.log('\nAll 5 Node.js API Engineering & Security Test Suites Passed Successfully!');
 })();

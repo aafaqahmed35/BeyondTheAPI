@@ -326,7 +326,7 @@ public class Module06ApiSecurityExamples {
     // 5. Idempotency Key State Machine & Duplicate Replay Handling
     // =========================================================================
 
-    public enum IdempotencyStatus { IN_FLIGHT, COMPLETED }
+    public enum IdempotencyStatus { IN_FLIGHT, COMPLETED, RECONCILIATION_REQUIRED }
 
     public record IdempotencyRecord(
             String idempotencyKey,
@@ -346,6 +346,10 @@ public class Module06ApiSecurityExamples {
          * Atomic execution with idempotency key.
          */
         public ExecutionResult execute(String key, String requestPayload, Callable<ExecutionResult> businessOperation) {
+            return execute(key, requestPayload, false, businessOperation);
+        }
+
+        public ExecutionResult execute(String key, String requestPayload, boolean hasExternalSideEffects, Callable<ExecutionResult> businessOperation) {
             String payloadHash = Integer.toHexString(requestPayload.hashCode());
 
             // Step 1: Atomic reservation of key
@@ -367,6 +371,11 @@ public class Module06ApiSecurityExamples {
                     return new ExecutionResult(409, "{\"error\":\"OPERATION_ALREADY_IN_FLIGHT\"}", false);
                 }
 
+                if (existing.status() == IdempotencyStatus.RECONCILIATION_REQUIRED) {
+                    // Ambiguous failure after external side-effect: do not delete or blindly re-execute!
+                    return new ExecutionResult(409, "{\"error\":\"TRANSACTION_PENDING_RECONCILIATION\"}", false);
+                }
+
                 if (existing.status() == IdempotencyStatus.COMPLETED) {
                     // Safe replay: return previously cached response
                     return new ExecutionResult(existing.statusCode(), existing.responseBody(), true);
@@ -382,8 +391,16 @@ public class Module06ApiSecurityExamples {
                 store.put(key, completedRecord);
                 return result;
             } catch (Exception e) {
-                // On system failure, remove in-flight reservation so client can retry
-                store.remove(key);
+                if (hasExternalSideEffects) {
+                    // Ambiguous external side effect occurred: mark as RECONCILIATION_REQUIRED.
+                    // DO NOT delete the in-flight key, as an immediate retry would double-charge or duplicate external mutations!
+                    store.put(key, new IdempotencyRecord(
+                            key, payloadHash, IdempotencyStatus.RECONCILIATION_REQUIRED, 500, "{\"error\":\"DOWNSTREAM_UNCERTAINTY\"}", Instant.now()
+                    ));
+                } else {
+                    // On local database abort before external RPCs, removing reservation allows safe client retry
+                    store.remove(key);
+                }
                 throw new RuntimeException("Business operation failed", e);
             }
         }
@@ -419,7 +436,30 @@ public class Module06ApiSecurityExamples {
         IdempotencyManager.ExecutionResult res3 = manager.execute(key, "{\"amount\":9999,\"currency\":\"USD\"}", paymentOp);
         assert res3.httpStatus() == 422 : "Payload mismatch for existing key must yield 422";
 
-        System.out.println("    -> Passed: Idempotency state machine guarantees single execution and safe replays.");
+        // Fourth call: Ambiguous external side effect failure must transition to RECONCILIATION_REQUIRED
+        String externalKey = "idem_key_uuid_ext_456";
+        AtomicInteger externalChargeCount = new AtomicInteger(0);
+        Callable<IdempotencyManager.ExecutionResult> failingExternalOp = () -> {
+            externalChargeCount.incrementAndGet();
+            throw new RuntimeException("Downstream payment gateway socket read timeout after dispatch!");
+        };
+
+        boolean threw = false;
+        try {
+            manager.execute(externalKey, payload, true, failingExternalOp);
+        } catch (RuntimeException e) {
+            threw = true;
+        }
+        assert threw : "External operation failure should propagate";
+        assert externalChargeCount.get() == 1 : "Gateway was called once";
+
+        // Subsequent client retry must NOT delete key or re-execute external gateway!
+        IdempotencyManager.ExecutionResult resRetry = manager.execute(externalKey, payload, true, failingExternalOp);
+        assert resRetry.httpStatus() == 409 : "Ambiguous failure requires manual reconciliation before retry";
+        assert resRetry.responseBody().contains("TRANSACTION_PENDING_RECONCILIATION");
+        assert externalChargeCount.get() == 1 : "Downstream external mutation must NEVER be re-invoked automatically!";
+
+        System.out.println("    -> Passed: Idempotency state machine guarantees single execution, safe replays, and durable reconciliation locks.");
     }
 
     // =========================================================================

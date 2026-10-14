@@ -133,7 +133,7 @@ A method is **safe** if its defined semantics are essentially read-only. Calling
 
 #### Idempotency
 A method is **idempotent** if the intended effect on the server of multiple identical requests with that method is the same as the effect for a single such request.
-- `PUT /users/42` is idempotent: Sending `{ "name": "Alice" }` five times leaves user 42 in the exact same state as sending it once.
+- `PUT /users/42` is idempotent: Per RFC 9110 §9.3.4, `PUT` replaces the entire state of the target resource identified by the Request-URI with the enclosed representation. Sending `{ "name": "Alice" }` five times leaves user 42 in the exact same state as sending it once. Any fields omitted in a `PUT` payload are overwritten or reset to defaults.
 - `DELETE /orders/99` is idempotent: Sending the request once removes the order (returning 204 or 200). Sending it again finds the order already deleted (returning 404). While the status code changes, the *resulting server state* is identical: the resource remains absent.
 - `POST /orders` is non-idempotent: Submitting five identical POST requests will create five distinct orders with five distinct identifiers, charging the user's credit card five times unless an application-level idempotency mechanism intervenes.
 - `PATCH /accounts/1` is non-idempotent in the general case: A patch operation instructing `{ "op": "increment", "path": "/balance", "value": 100 }` will add 100 on every invocation.
@@ -158,8 +158,8 @@ HTTP status codes are 3-digit integers categorized by their first digit:
 
 #### Critical Status Codes for Backend APIs
 - **`200 OK`**: Standard success for requests returning a representation (`GET`, `PUT`, `PATCH`).
-- **`201 Created`**: The request succeeded and resulted in the creation of one or more new resources. **Requirement:** Must include a `Location` header indicating the URI of the newly created resource.
-- **`202 Accepted`**: The request has been accepted for asynchronous processing, but the processing has not completed. Essential for long-running workflows, video encoding, or distributed message publishing. Include a `Location` header pointing to a status polling endpoint.
+- **`201 Created`**: The request succeeded and resulted in the creation of one or more new resources. Per RFC 9110 §15.3.2, the primary created resource is identified by either a `Location` header field in the response or, if omitted, by the effective request URI itself. While providing `Location` is standard and strongly recommended when a new sub-resource URI is allocated, it is not unconditionally mandatory on every valid 201 response.
+- **`202 Accepted`**: The request has been accepted for asynchronous processing, but the processing has not completed. Essential for long-running workflows, video encoding, or distributed message publishing. Recommended to include a `Location` header pointing to a status polling endpoint.
 - **`204 No Content`**: The request succeeded, and the server fulfilled the action without returning a payload body. Standard for `DELETE` operations and mutation actions.
 - **`301 Moved Permanently` vs. `308 Permanent Redirect`**: `301` historically allowed clients to rewrite `POST` to `GET`. `308` strictly requires the client to retain the original HTTP method and body when redirecting.
 - **`302 Found` vs. `307 Temporary Redirect`**: Similarly, `302` was rewritten to `GET` by browsers. `307` guarantees method preservation.
@@ -174,10 +174,10 @@ HTTP status codes are 3-digit integers categorized by their first digit:
 - **`413 Content Too Large`**: The server refuses to process the request because the payload is larger than the server is willing or able to process.
 - **`415 Unsupported Media Type`**: The origin server refuses to service the request because the payload format is in an unsupported format (e.g., client sent `application/xml` to an API expecting `application/json`).
 - **`422 Unprocessable Content`**: The request syntax is well-formed JSON, but the semantic content contains validation errors (e.g., negative integer for price, invalid date format).
-- **`429 Too Many Requests`**: The user has sent too many requests in a given amount of time ("rate limiting"). **Requirement:** Should include a `Retry-After` header indicating how many seconds to wait before retrying.
+- **`429 Too Many Requests`**: The user has sent too many requests in a given amount of time ("rate limiting"). RFC 6585 specifies that the server `SHOULD` include a `Retry-After` header indicating how many seconds (or an HTTP-date) to wait. Because dynamic rate limiters or cluster routers may omit this header, clients must not assume it is universally present and must implement exponential backoff with full jitter as a fallback.
 - **`500 Internal Server Error`**: An unhandled exception or critical bug occurred within the application code.
 - **`502 Bad Gateway`**: The server, acting as a gateway or proxy (e.g., Nginx, Envoy, API Gateway), received an invalid response or connection drop from an inbound upstream application service.
-- **`503 Service Unavailable`**: The server is currently unable to handle the request due to temporary overload, scheduled maintenance, or exhausted database connection pools. Include `Retry-After`.
+- **`503 Service Unavailable`**: The server is currently unable to handle the request due to temporary overload, scheduled maintenance, or exhausted database connection pools. Per RFC 9110 §15.6.4, servers `MAY` send `Retry-After` if recovery time is known, but clients must treat it as optional and apply backoff.
 - **`504 Gateway Timeout`**: The gateway or proxy server did not receive a timely response from the upstream application server before its configured read timeout elapsed.
 
 ---
@@ -196,8 +196,8 @@ Headers provide metadata governing routing, caching, security, and payload parsi
 
 #### Conditional Requests and ETags
 An **Entity Tag (ETag)** is an opaque validator token assigned by a server to a specific version of a resource:
-- **Strong ETag** (`ETag: "686897696a7c876b7e"`): Guarantees byte-for-byte identity of the representation.
-- **Weak ETag** (`ETag: W/"686897696a7c876b7e"`): Guarantees semantic equivalence (e.g., JSON keys may have changed order, but underlying domain data is identical).
+- **Strong ETag** (`ETag: "686897696a7c876b7e"`): Guarantees byte-for-byte identity of the representation. Mandatory for sub-range requests (`If-Range`) and strong concurrency checks (`If-Match`).
+- **Weak ETag** (`ETag: W/"686897696a7c876b7e"`): Prefixed with `W/`. Guarantees semantic equivalence (e.g., JSON key ordering or formatting whitespace may vary, but the underlying entity attributes are equivalent). Per RFC 9110 §8.8.3, weak comparison is valid **only for cache revalidation** (`If-None-Match`). Weak ETags must **never** be used for range requests or strong optimistic lock precondition checks (`If-Match`), as byte-level and transaction-level integrity cannot be assured.
 
 A client caching a resource sends a conditional GET:
 ```http
@@ -221,26 +221,30 @@ If another transaction updated the product in the interim, its ETag changed. The
 ### 1.5 Protocol Evolution: HTTP/1.1 vs. HTTP/2 vs. HTTP/3
 
 ```
-+------------------+---------------------+---------------------+---------------------+
-| Feature          | HTTP/1.1            | HTTP/2              | HTTP/3              |
-+------------------+---------------------+---------------------+---------------------+
-| Transport        | TCP                 | TCP + TLS (ALPN)    | QUIC (UDP + TLS 1.3)|
-| Framing          | Plaintext textual   | Binary frames       | Binary frames       |
-| Concurrency      | 1 request per TCP   | Multiplexed streams | Multiplexed streams |
-|                  | connection (pipeline| over 1 TCP          | over independent    |
-|                  | flawed)             | connection          | QUIC streams        |
-| Head-of-Line     | Application-level   | TCP-level transport | None (packet loss on|
-| Blocking         | (slow response      | (dropped TCP packet | 1 stream does not   |
-|                  | blocks connection)  | stalls ALL streams) | stall other streams)|
-| Header Overheads | Redundant plaintext | HPACK compression   | QPACK compression   |
-| Handshake RTT    | 1-RTT TCP + 1-2 TLS | 1-RTT TCP + 1 TLS   | 0-RTT to 1-RTT      |
-| Connection       | IP/Port bound; drops| IP/Port bound; drops| Connection ID based;|
-| Migration        | on network switch   | on network switch   | seamless WiFi/5G    |
-+------------------+---------------------+---------------------+---------------------+
++------------------+-----------------------+---------------------+---------------------+
+| Feature          | HTTP/1.1              | HTTP/2              | HTTP/3              |
++------------------+-----------------------+---------------------+---------------------+
+| Transport        | TCP                   | TCP + TLS (ALPN)    | QUIC (UDP + TLS 1.3)|
+| Framing          | Plaintext textual     | Binary frames       | Binary frames       |
+| Concurrency      | Sequential per conn;  | Multiplexed streams | Multiplexed streams |
+|                  | connection pools (~6  | over 1 TCP          | over independent    |
+|                  | conns/origin in browser) connection         | QUIC streams        |
+| Head-of-Line     | Application-level     | TCP-level transport | Transport HoL       |
+| Blocking         | (slow response blocks | (dropped TCP packet | eliminated (stream  |
+|                  | current connection)   | stalls ALL streams) | packet loss isolated|
+| Header Overheads | Redundant plaintext   | HPACK compression   | QPACK compression   |
+| Handshake RTT    | 1-RTT TCP + 1-2 TLS   | 1-RTT TCP + 1 TLS   | 1-RTT initial;      |
+|                  |                       |                     | 0-RTT resumption    |
+| Connection       | IP/Port bound; drops  | IP/Port bound; drops| Connection ID based;|
+| Migration        | on network switch     | on network switch   | seamless WiFi/5G    |
++------------------+-----------------------+---------------------+---------------------+
 ```
 
-#### Head-of-Line (HoL) Blocking Breakdown
-In HTTP/1.1, browsers opened 6 concurrent TCP connections per domain to achieve rudimentary concurrency. In HTTP/2, all requests are interleaved as binary frames over a single TCP connection. However, if an underlying IP packet is dropped on the network, TCP's sliding window stops delivery of *all* subsequent packets until retransmission occurs. Thus, in high-packet-loss environments (mobile networks), HTTP/2 can perform *worse* than HTTP/1.1. HTTP/3 resolves this fundamentally by replacing TCP with QUIC over UDP: each stream has independent loss recovery.
+#### Head-of-Line (HoL) Blocking and Handshake Dynamics
+1. **HTTP/1.1 Concurrency Reality:** Because HTTP/1.1 pipelining suffered from severe intermediary proxy bugs and application-level head-of-line blocking (where a slow response blocks all subsequent responses on that TCP socket), production browsers disabled pipelining and achieved concurrency by opening pools of separate TCP connections (typically up to 6 per origin).
+2. **HTTP/2 TCP Transport HoL:** HTTP/2 multiplexes virtual streams over a single TCP connection. However, because TCP enforces a strictly ordered byte stream across the entire connection, a single dropped IP packet stalls delivery of *all* streams until TCP retransmits and acknowledges the missing segment. On lossy mobile networks, HTTP/2 can exhibit higher tail latency than pooled HTTP/1.1.
+3. **HTTP/3 QUIC Isolation:** HTTP/3 replaces TCP with QUIC over UDP. Each stream manages its own independent packet sequence and loss recovery; dropped packets on Stream A never stall Stream B.
+4. **QUIC 0-RTT Replay Vulnerability:** Initial QUIC connections require 1-RTT (combining transport setup and TLS 1.3 handshake). Resumed connections can transmit 0-RTT early data using pre-shared keys. However, **0-RTT data is vulnerable to network replay attacks** because early data packets lack fresh Diffie-Hellman ephemeral guarantees. Production gateways must strictly forbid non-idempotent state mutations (`POST`) in 0-RTT requests, permitting only safe, idempotent requests (`GET`/`HEAD`).
 
 ---
 
@@ -361,7 +365,7 @@ Content-Type: application/json-patch+json
   { "op": "test", "path": "/version", "value": 3 }
 ]
 ```
-The `test` operation enables atomic optimistic concurrency: if the user's version is not 3, the entire patch fails with `409 Conflict` or `412 Precondition Failed`.
+The `test` operation enables atomic optimistic concurrency: if the target value does not match, the entire patch operation MUST fail. Per RFC 6902 §5, a failed `test` operation is properly reported using `409 Conflict` (when indicating a resource state concurrency conflict) or `422 Unprocessable Content` / `400 Bad Request`. (Note: `412 Precondition Failed` is reserved by RFC 9110 for request-level conditional headers such as `If-Match`).
 
 ---
 
@@ -386,14 +390,17 @@ APIs must evolve without breaking existing mobile clients, web applications, or 
 ```
 
 #### Deprecation Lifecycle & Sunset Headers
-When retiring an API version, notify consumers programmatically via RFC 8594 `Sunset` and `Deprecation` headers:
+When retiring an API version, notify consumers programmatically via RFC 8594 `Sunset` and IETF `Deprecation` headers:
 ```http
 HTTP/1.1 200 OK
-Deprecation: @1760443200
+Deprecation: Wed, 15 Oct 2025 00:00:00 GMT
 Sunset: Wed, 11 Nov 2026 00:00:00 GMT
 Link: <https://api.example.com/docs/v2-migration>; rel="deprecation"; type="text/html"
 ```
-Monitor API gateway telemetry to identify which client tokens continue invoking deprecated routes before pulling the plug.
+- **`Sunset` (RFC 8594):** Formatted strictly as an `HTTP-date`. Signals the exact date and time after which the server plans to become permanently unresponsive at this URI.
+- **`Deprecation` (IETF draft):** Communicates that the endpoint is deprecated. Specified either as an `HTTP-date` or as a boolean/timestamp depending on the client profile.
+- **`Link` Header:** Provides clients and developers with a direct hypermedia link to migration documentation (`rel="deprecation"`).
+Monitor API gateway telemetry to identify which client credentials continue invoking deprecated routes before pulling the plug.
 
 ---
 
@@ -573,22 +580,23 @@ A frequent interview trap: *"We encrypt user passwords in the database using AES
 +----------------+---------------+------------------+------------------------------------+
 | Algorithm      | Category      | Memory-Hard?     | Current Industry Standing          |
 +----------------+---------------+------------------+------------------------------------+
-| MD5 / SHA-1    | Cryptographic | NO (Fast)        | BROKEN. Billions of hashes/sec on  |
-|                | Hash          |                  | consumer GPUs. Instant rainbow look|
-| SHA-256/SHA-512| Cryptographic | NO (Fast)        | INSUFFICIENT for passwords without |
-|                | Hash          |                  | millions of PBKDF2 iterations.     |
-| PBKDF2         | Key Derivation| NO (CPU-bound)   | Legacy acceptable; vulnerable to   |
-|                | Function      |                  | ASIC parallel acceleration.        |
-| bcrypt         | Password Hash | CPU & small cache| STRONG. Configurable work factor   |
-|                | (Blowfish)    | bound (4 KB)     | (cost 12+ standard).               |
-| Argon2id       | Memory-Hard   | YES (Configurable| GOLD STANDARD. OWASP recommended.  |
-|                | Password Hash | RAM e.g. 64 MB)  | Defeats GPU and ASIC cracking.     |
+| MD5 / SHA-1    | Cryptographic | NO (Fast)        | BROKEN. Trivial collision and GPU  |
+|                | Hash          |                  | brute-force attacks; never use.    |
+| SHA-256/SHA-512| Cryptographic | NO (Fast)        | INSUFFICIENT for passwords alone.  |
+|                | Hash          |                  | Designed for rapid data integrity. |
+| PBKDF2         | Key Derivation| NO (CPU-bound)   | Legacy acceptable. Lacks memory    |
+|                | Function      |                  | hardness; vulnerable to ASIC/GPU.  |
+| bcrypt         | Password Hash | CPU & small cache| STRONG. Has hard 72-byte password  |
+|                | (Eksblowfish) | bound (4 KB)     | limit; 4 KB state fits L1 cache.   |
+| Argon2id       | Memory-Hard   | YES (Tunable     | GOLD STANDARD. PHC winner; combines|
+|                | Password Hash | RAM, time, lanes)| Argon2d (GPU) and Argon2i (timing).|
 +----------------+---------------+------------------+------------------------------------+
 ```
 
-#### Why Salt and Work Factor Are Mandatory
-1. **Cryptographic Salt:** A unique, cryptographically random byte string generated per-user and prepended to the password before hashing. Neutralizes precomputed rainbow table attacks.
-2. **Work Factor / Cost:** Forces the hashing function to consume substantial CPU cycles and RAM. While an authentic user waits 200 milliseconds to log in, an attacker attempting to brute-force 10 billion password guesses requires decades of compute time.
+#### Salt, Work Factor, and Production Benchmarking
+1. **Cryptographic Salt:** A unique, cryptographically secure random byte sequence generated per credential and stored alongside the hash digest. Salt ensures identical passwords produce distinct digests, defeating precomputed rainbow table attacks and cross-user correlation.
+2. **Work Factor / Cost Calibration:** Forces candidate hash evaluation to consume substantial CPU cycles and memory. An authentic user performing an isolated login experiences a negligible delay, while an attacker attempting millions of offline guesses faces severe hardware and time bottlenecks.
+3. **Benchmarking Over Prescriptions:** Universal cost-factor prescriptions (such as claiming "cost 12 is universally standard") ignore deployment reality: hardware capabilities vary widely between developer workstations and resource-constrained cloud containers. Engineering teams should benchmark password verification latency directly on target production hardware, tuning memory and iteration parameters to consume 100–300 ms per hash. This maximizes brute-force resistance while remaining strictly within the service's authentication latency and CPU throughput budget under peak login volume.
 
 ---
 
@@ -618,26 +626,34 @@ A frequent interview trap: *"We encrypt user passwords in the database using AES
 
 ---
 
-### 5.2 Browser Cookie Security Attributes
+### 5.2 Browser Cookie Security Attributes and Prefixes
 
-When an API serves browser clients, session identifiers and refresh tokens should be transmitted in HTTP cookies hardened with all four critical security attributes:
+When an API serves browser clients, session identifiers and refresh tokens should be transmitted in HTTP cookies hardened with explicit security attributes and standard prefix constraints:
 
 ```http
-Set-Cookie: __Host-sessionId=s%3A7a8f9b2c...; 
-            Secure; 
-            HttpOnly; 
-            SameSite=Strict; 
-            Path=/; 
+Set-Cookie: __Host-sessionId=s%3A7a8f9b2c...;
+            Secure;
+            HttpOnly;
+            SameSite=Lax;
+            Path=/;
             Max-Age=3600
 ```
 
-1. **`Secure`**: Enforces that the cookie is transmitted **only** over encrypted HTTPS connections. Never sent over unencrypted plaintext HTTP, preventing passive network eavesdropping (Man-in-the-Middle attacks on public Wi-Fi).
-2. **`HttpOnly`**: Blocks client-side scripts from accessing `document.cookie`. If an attacker discovers a Cross-Site Scripting (XSS) vulnerability, they cannot directly read or exfiltrate an `HttpOnly` cookie.
-3. **`SameSite`**: Governs whether cookies are attached to cross-site requests, acting as the primary modern defense against Cross-Site Request Forgery (CSRF):
-   - **`SameSite=Strict`**: The cookie is sent **only** if the request originates from the exact same domain. Clicking a link from an external email or site to your bank will *not* send the cookie.
-   - **`SameSite=Lax`**: The cookie is withheld on cross-site sub-requests (images, iframes, AJAX `fetch`), but attached when navigating top-level links (following an external hyperlink). Default in modern Chrome/Firefox.
-   - **`SameSite=None`**: Cookie is attached to all cross-site requests. **Mandatory constraint:** Can only be used if `Secure` is also enabled.
-4. **`__Host-` Cookie Prefix**: A security standard where browsers reject the cookie unless it is marked `Secure`, originates from an HTTPS host, has `Path=/`, and omits the `Domain` attribute (preventing subdomain inheritance and cookie tossing attacks).
+#### Core Security Attributes
+1. **`Secure`**: Enforces that the cookie is transmitted **only** over encrypted HTTPS connections. The browser will never transmit the cookie over unencrypted plaintext HTTP, preventing passive network eavesdropping on untrusted Wi-Fi.
+2. **`HttpOnly`**: Blocks client-side scripts from accessing the cookie via `document.cookie`. If an application contains an XSS flaw, an attacker cannot directly exfiltrate an `HttpOnly` session cookie via script.
+3. **`SameSite` Policy (CSRF Mitigation)**: Governs whether cookies are attached to cross-site requests:
+   - **`SameSite=Lax` (Practical Web Session Default):** The cookie is withheld on cross-site sub-requests (such as `<img>`, `<iframe>`, and cross-origin `fetch`/`POST` requests), neutralizing classic CSRF exploits. However, the cookie **is attached on top-level cross-site GET navigations** (e.g., when a user clicks a hyperlink to your app from an email, Slack, or search engine). This makes `Lax` the standard choice for general browser session management, as users arrive seamlessly authenticated.
+   - **`SameSite=Strict` (High-Security Isolation):** The cookie is withheld on **all** cross-site requests without exception, including top-level GET navigation clicks. If a site uses `SameSite=Strict` for its primary session cookie, clicking a link from an external email or site causes the user to arrive appearing unauthenticated until they navigate internally. For this reason, `Strict` is **not** a universal default for web applications; it is specifically reserved for sensitive mutation portals, admin control planes, or dedicated transaction confirmation tokens.
+   - **`SameSite=None`:** The cookie is attached to all cross-site requests (e.g. third-party embedded widgets). **Mandatory constraint:** Browsers reject `SameSite=None` unless `Secure` is also present.
+
+#### The `__Host-` Cookie Prefix Standard (RFC 6265bis)
+Cookie prefixes provide structural browser enforcement that cannot be overridden by weak or misconfigured attributes. The `__Host-` prefix is independent of `SameSite` policy and requires the browser to enforce five strict criteria:
+1. The cookie name **must begin with `__Host-`** (case-sensitive).
+2. The cookie **must have the `Secure` attribute**.
+3. The cookie **must originate from a secure origin (HTTPS)**.
+4. The cookie **must specify `Path=/`** (binding it to the entire origin).
+5. The cookie **must omit the `Domain` attribute**. Omitting `Domain` prevents subdomain inheritance, ensuring that sibling or child subdomains (e.g., `vulnerable.sub.example.com`) cannot overwrite, shadow, or "cookie-toss" malicious session identifiers onto `example.com`.
 
 ---
 
@@ -752,12 +768,23 @@ OAuth 2.0 provides **authorization** ("What may the client do?"), but intentiona
 +------------------------------------+------------------------------------+
 | Target: Resource Server (API)      | Target: Client Application         |
 | Purpose: Authorization Credential  | Purpose: Authentication Assertion  |
-| Format: Opaque or JWT              | Format: Always a signed JWT        |
+| Format: Opaque string or JWT       | Format: Always a signed JWT (JWS)  |
 | Content: Scopes, tenant, user ID   | Content: Profile info, email, auth |
 |                                    |          timestamp, nonce          |
-| Never parsed by the client app!    | Parsed by client app to render UI! |
+| Treated as opaque bearer by client | Decoded and validated by client app|
 +------------------------------------+------------------------------------+
 ```
+
+#### Decoding vs. Cryptographic Validation of ID Tokens
+A pervasive and dangerous anti-pattern is assuming that Base64URL-decoding an ID token to inspect its claims constitutes validation. Anyone can forge an unauthenticated JSON payload with `{"sub": "admin", "email": "ceo@example.com"}` and encode it into a three-part string.
+
+Before a client application trusts any identity assertion inside an ID token, it **must perform rigorous cryptographic validation**:
+1. **Signature Verification:** Verify the token's JWS signature against the Identity Provider's public keys published at its well-known JWKS endpoint (`/.well-known/jwks.json`), matching the `kid` (Key ID) header and using the expected asymmetric algorithm (`RS256` or `ES256`).
+2. **Issuer Verification (`iss`):** Assert that the `iss` claim exactly matches the expected IdP issuer URL (e.g., `https://accounts.example.com`).
+3. **Audience Verification (`aud`):** Assert that the `aud` claim contains the client application's registered `client_id`. Tokens issued for other clients must be rejected to prevent token-substitution attacks.
+4. **Temporal Validity (`exp`, `iat`, `nbf`):** Verify that the current system timestamp is strictly within the validity window (allowing at most 1–2 minutes for clock skew).
+5. **Nonce Binding (`nonce`):** If the client generated a cryptographically random `nonce` and stored it in the user's session before initiating the authorization redirect, verify that the ID token's `nonce` claim matches the session nonce identically. This cryptographically binds the issued token to that specific client session, preventing token injection and replay attacks.
+6. **Token Boundary Separation:** ID tokens are strictly intended for the client application to establish session identity and render user details in UI. **ID tokens must never be sent as authorization credentials to Resource Server APIs.** Backend APIs expect OAuth 2.0 Access Tokens.
 
 ---
 
@@ -871,10 +898,24 @@ public class SecurityConfiguration {
 
     @Bean
     public PasswordEncoder passwordEncoder() {
-        return new BCryptPasswordEncoder(12); // Cost factor 12
+        // Work factor tuned to target production hardware (benchmarked to ~100-250ms)
+        return new BCryptPasswordEncoder(12);
     }
 }
 ```
+
+#### When Is Disabling CSRF Safe vs. a Lethal Vulnerability?
+A common interview and architectural mistake is treating `.csrf(csrf -> csrf.disable())` as standard boilerplate for every modern REST API:
+1. **When Disabling CSRF Is Appropriate:** Disabling CSRF is **strictly safe only** when the application is completely stateless (`SessionCreationPolicy.STATELESS`) **and** authentication relies exclusively on non-ambient credentials (such as an `Authorization: Bearer <token>` header). Browsers never automatically attach custom request headers cross-origin; therefore, cross-site request forgery is structurally impossible for pure bearer-token APIs.
+2. **When Disabling CSRF Is a Catastrophic Vulnerability:** If any part of the API serves browser clients where authentication relies on **ambient credentials** (session cookies or HTTP Basic Authentication automatically managed and attached by the browser), disabling CSRF exposes the API to trivial request forgery! An attacker hosting an external website can submit mutating forms or JavaScript requests that execute under the victim's authenticated session.
+3. **Cookie-Authenticated REST/SPA Configuration:** For browser applications using cookie-based authentication, CSRF protection must remain active, configured with a token repository that Single Page Applications can consume:
+   ```java
+   .csrf(csrf -> csrf
+       .csrfTokenRepository(CookieCsrfTokenRepository.withHttpOnlyFalse())
+       .csrfTokenRequestHandler(new CsrfTokenRequestAttributeHandler())
+   )
+   ```
+   The browser receives the CSRF token in an accessible cookie (`XSRF-TOKEN`). The SPA's HTTP interceptor reads this cookie value and supplies it in a dedicated header (`X-XSRF-TOKEN`) on all mutating requests (`POST`, `PUT`, `DELETE`, `PATCH`).
 
 #### Roles vs. Authorities in Spring Security
 - **Authority:** A raw permission string (e.g., `orders:write`, `SCOPE_read`). Checked via `.hasAuthority("orders:write")`.
@@ -908,6 +949,12 @@ import jwt from 'jsonwebtoken';
 
 const app = express();
 
+// Fail fast on missing cryptographic configuration at startup
+const JWT_PUBLIC_KEY = process.env.JWT_PUBLIC_KEY;
+if (!JWT_PUBLIC_KEY) {
+    throw new Error('FATAL: JWT_PUBLIC_KEY environment variable is required at startup.');
+}
+
 // 1. Security Headers via Helmet (HSTS, CSP, X-Frame-Options, Sniff prevention)
 app.use(helmet());
 
@@ -933,9 +980,20 @@ const apiLimiter = rateLimit({
 });
 app.use('/api/', apiLimiter);
 
-// 5. Authentication Middleware
+// 5. Authentication Middleware & Verified Claims Validation
+const VerifiedClaimsSchema = z.object({
+    sub: z.string().min(1),
+    role: z.string().min(1),
+    tenantId: z.string().min(1),
+    iss: z.literal('https://auth.example.com'),
+    aud: z.literal('https://api.example.com'),
+    exp: z.number().int()
+});
+
+export type VerifiedClaims = z.infer<typeof VerifiedClaimsSchema>;
+
 export interface AuthenticatedRequest extends Request {
-    user?: { sub: string; role: string; tenantId: string };
+    user?: VerifiedClaims;
 }
 
 export function authenticateJwt(req: AuthenticatedRequest, res: Response, next: NextFunction) {
@@ -945,12 +1003,22 @@ export function authenticateJwt(req: AuthenticatedRequest, res: Response, next: 
     }
     const token = authHeader.substring(7);
     try {
-        const decoded = jwt.verify(token, process.env.JWT_PUBLIC_KEY!, {
+        const rawPayload = jwt.verify(token, JWT_PUBLIC_KEY, {
             algorithms: ['RS256'],
             audience: 'https://api.example.com',
             issuer: 'https://auth.example.com'
-        }) as any;
-        req.user = { sub: decoded.sub, role: decoded.role, tenantId: decoded.tenantId };
+        });
+
+        // Validate shape, types, and presence of critical claims without unsafe casts
+        const parsed = VerifiedClaimsSchema.safeParse(rawPayload);
+        if (!parsed.success) {
+            return res.status(401).json({
+                error: 'INVALID_TOKEN_CLAIMS',
+                message: 'Token claims do not satisfy application trust boundary requirements'
+            });
+        }
+
+        req.user = parsed.data;
         next();
     } catch (err) {
         return res.status(401).json({ error: 'INVALID_TOKEN', message: 'Token verification failed' });
@@ -1109,12 +1177,12 @@ This section analyzes 18 critical API attack vectors, providing the threat model
 - **Common Misconception:** Checking `url.contains("bank.com")` (attacker bypasses with `bank.com.evil.com`).
 
 ### 14. Replay and Idempotency Insecurity
-- **Threat Model:** Intercepted requests are re-transmitted to duplicate actions (e.g., repeating a financial transfer).
-- **Vulnerable Pattern:** State-changing POST endpoints lacking idempotency checks or timestamps.
-- **Exploit:** Network replay of an authorized payment submission packet.
-- **Defense:** Mandatory `Idempotency-Key` headers, one-time nonce tracking, TLS sequence numbers.
-- **Testing Strategy:** Replay identical requests concurrently; assert only one state modification commits.
-- **Common Misconception:** Assuming HTTPS prevents client-side retries or malicious replays by authenticated users.
+- **Threat Model:** Intercepted, retried, or duplicate requests trigger duplicate state mutations (e.g., executing a financial transfer twice).
+- **Vulnerable Pattern:** State-changing POST endpoints lacking idempotency key verification, unique nonces, or timestamp skew bounds.
+- **Exploit:** An authenticated user or network attacker repeats an authorized mutation request across new connections or retries.
+- **Defense:** Mandatory application-level `Idempotency-Key` headers, unique request nonces, and signed request timestamps with tight skew windows.
+- **Testing Strategy:** Replay identical requests concurrently and sequentially; assert only one state modification commits.
+- **Common Misconception:** Believing that TLS/HTTPS prevents business replay attacks. While internal TLS sequence numbers prevent an attacker on the wire from replaying or injecting packets *within an existing transport session*, TLS provides zero defense against application-level duplicate submissions across new connections or repeated requests. Replay protection at the business layer demands application-level token deduplication.
 
 ### 15. Information Leakage through Errors and Logs
 - **Threat Model:** Error responses or application logs expose internal implementation details, keys, or PII.
@@ -1201,6 +1269,15 @@ When an API transmits cookies or HTTP authentication cross-origin:
 - Server **must** respond with `Access-Control-Allow-Credentials: true`.
 - **The Wildcard Restriction:** When credentials are true, `Access-Control-Allow-Origin` **cannot be `*`**. The browser will outright reject the response. The server must explicitly reflect an authorized, allowlisted origin.
 
+#### Critical Distinction: Request Sending vs. Response Reading
+A widespread and dangerous engineering misconception is that CORS prevents cross-origin requests from reaching the server.
+
+In reality, the browser's Same-Origin Policy governs **reading responses**, not **sending requests**:
+1. **Simple Requests Execute Unhindered:** For "simple requests" (e.g., standard `GET` requests, or `POST` requests with content-types like `application/x-www-form-urlencoded` or `multipart/form-data` lacking custom headers), the browser **transmits the request immediately without a preflight**.
+2. **Server State Mutates:** The backend API processes the request, mutates database records, and dispatches external calls.
+3. **Browser Intervenes at Response Time:** Only after the server sends its HTTP response does the browser check for `Access-Control-Allow-Origin`. If missing or unauthorized, the browser prevents the client script from *reading* the response data.
+4. **Why CORS Never Protects Against CSRF:** Because the state mutation already committed on the server, CORS offers **zero defense against Cross-Site Request Forgery (CSRF)**. An attacker does not need to read the response to inflict damage. Defending against CSRF demands explicit server-side defenses: `SameSite` cookie policies, anti-CSRF synchronizer tokens, or custom headers (which force a preflight).
+
 ---
 
 ### 10.3 Comparative Security Matrix: SOP vs. CORS vs. CSRF vs. XSS
@@ -1234,20 +1311,20 @@ When an API transmits cookies or HTTP authentication cross-origin:
 ### 11.2 Deep Analysis of Rate Limiting Algorithms
 
 ```
-+------------------------+------------------+------------------+------------------------------------+------------------------------------+
-| Algorithm              | Time Complexity  | Space Overhead   | Key Advantage                      | Primary Failure Mode               |
-+------------------------+------------------+------------------+------------------------------------+------------------------------------+
-| Fixed Window Counter   | O(1)             | O(1) per client  | Trivial memory & implementation.   | Boundary bursting: 2x allowed      |
-|                        |                  | (single integer) |                                    | traffic at window reset edges.     |
-| Sliding Window Log     | O(log N)         | O(N) per client  | Perfectly accurate; zero boundary  | Severe memory bloat under high     |
-|                        |                  | (all timestamps) | burst vulnerabilities.             | volume traffic spikes.             |
-| Sliding Window Counter | O(1)             | O(1) per client  | Smooth rate curve; constant memory | Approximates rate based on weighted|
-|                        |                  | (2 integers)     | footprint.                         | previous window overlap.           |
-| Token Bucket           | O(1)             | O(1) per client  | Supports controlled burstiness     | Complex clock synchronization      |
-|                        |                  | (tokens + time)  | up to bucket capacity.             | across distributed nodes.          |
-| Leaky Bucket           | O(1)             | O(Queue Size)    | Guarantees smooth, constant-rate   | Drops bursts immediately once      |
-|                        |                  |                  | egress to protect legacy DBs.      | queue buffer is saturated.         |
-+------------------------+------------------+------------------+------------------------------------+------------------------------------+
++------------------------+---------------------+------------------+------------------------------------+------------------------------------+
+| Algorithm              | Time Complexity     | Space Overhead   | Key Advantage                      | Primary Failure Mode               |
++------------------------+---------------------+------------------+------------------------------------+------------------------------------+
+| Fixed Window Counter   | O(1)                | O(1) per client  | Trivial memory & implementation.   | Boundary bursting: 2x allowed      |
+|                        |                     | (single integer) |                                    | traffic at window reset edges.     |
+| Sliding Window Log     | Implementation dep. | O(N) per client  | Perfectly accurate; zero boundary  | Severe memory bloat under high     |
+|                        | (O(log M + K) Redis)| (all timestamps) | burst vulnerabilities.             | volume traffic spikes.             |
+| Sliding Window Counter | O(1)                | O(1) per client  | Smooth rate curve; constant memory | Approximates rate based on weighted|
+|                        |                     | (2 integers)     | footprint.                         | previous window overlap.           |
+| Token Bucket           | O(1)                | O(1) per client  | Supports controlled burstiness     | Complex clock synchronization      |
+|                        |                     | (tokens + time)  | up to bucket capacity.             | across distributed nodes.          |
+| Leaky Bucket           | O(1)                | O(Queue Size)    | Guarantees smooth, constant-rate   | Drops bursts immediately once      |
+|                        |                     |                  | egress to protect legacy DBs.      | queue buffer is saturated.         |
++------------------------+---------------------+------------------+------------------------------------+------------------------------------+
 ```
 
 #### The Fixed Window Boundary Burst Vulnerability
@@ -1257,37 +1334,51 @@ Suppose a rate limit allows 100 requests per minute. An attacker sends 100 reque
 
 ### 11.3 Distributed Rate Limiting with Redis & Atomic Lua Scripts
 
-In distributed microservices, application instances cannot rely on in-memory counters. A shared Redis cluster provides unified state. To eliminate race conditions between reading and updating counters, the operation **must execute atomically via a Redis Lua script**:
+In distributed microservices, application instances cannot rely on in-memory counters. A shared Redis cluster provides unified state. To eliminate race conditions between reading and updating counters, the operation **must execute atomically via a Redis Lua script**.
+
+#### The Sorted Set (ZSET) Member Collision Bug
+A notorious implementation bug in Redis sliding-window limiters is executing `redis.call('ZADD', key, now, now)`. In Redis Sorted Sets, members are strictly unique. If multiple requests arrive within the **same millisecond**, using the timestamp alone as the member causes collision: Redis simply updates the existing member's score rather than inserting a new element! Consequently, `ZCARD` never increments, allowing high-frequency bursts to bypass the rate limit completely.
+
+To prevent member collision, each request must append a unique identifier (UUID, sequence number, or random nonce):
 
 ```lua
--- Redis Sliding Window Counter Lua Script (Atomic execution)
+-- Redis Sliding Window Log Lua Script (Atomic execution)
 -- KEYS[1]: Rate limit key (e.g., rate:user_42)
 -- ARGV[1]: Current Unix Timestamp in milliseconds
 -- ARGV[2]: Window size in milliseconds
 -- ARGV[3]: Maximum allowed requests in window
+-- ARGV[4]: Unique Request ID / Nonce (prevents same-millisecond ZSET member collision)
 
 local key = KEYS[1]
 local now = tonumber(ARGV[1])
 local window = tonumber(ARGV[2])
 local limit = tonumber(ARGV[3])
+local requestId = ARGV[4]
 local clearBefore = now - window
 
--- 1. Remove timestamps outside current sliding window
+-- 1. Remove expired timestamps outside the sliding window: O(log(M) + K)
 redis.call('ZREMRANGEBYSCORE', key, 0, clearBefore)
 
--- 2. Count current elements in window
+-- 2. Count active requests within the window: O(1)
 local currentRequests = redis.call('ZCARD', key)
 
 if currentRequests < limit then
-    -- 3. Add current request timestamp
-    redis.call('ZADD', key, now, now)
-    -- Set TTL to automatically clean up inactive keys
-    redis.call('PEXPIRE', key, window)
-    return {1, limit - currentRequests - 1} -- Allowed, remaining
+    -- 3. Add unique member (now:requestId) with score = now: O(log(M))
+    local uniqueMember = now .. ':' .. requestId
+    redis.call('ZADD', key, now, uniqueMember)
+
+    -- Set TTL to clean up inactive keys once the sliding window elapses
+    redis.call('PEXPIRE', key, window + 1000)
+    return {1, limit - currentRequests - 1} -- Allowed, remaining quota
 else
     return {0, 0} -- Denied
 end
 ```
+
+#### Production Considerations: Clock Skew, Expiration, and Memory Footprint
+1. **Clock Skew Assumptions:** Passing client or application server timestamps as `ARGV[1]` assumes reasonable NTP synchronization across application nodes. If servers suffer severe clock drift, window evaluation can become erratic. In strict environments, the Redis `TIME` command can be used inside Redis, though it requires formatting.
+2. **Key Expiration Policy:** The script applies `PEXPIRE` with a modest safety buffer (`window + 1000` ms) so idle keys are automatically garbage collected without leaking RAM, while active clients keep their sliding window history intact.
+3. **Memory Trade-offs ($O(N)$ vs. $O(1)$):** While the sliding-log approach offers mathematically exact rate limiting, storing individual member strings for millions of requests requires substantial RAM ($O(N)$ per client). For ultra-high-throughput public gateways, a **Two-Counter Sliding Window** (approximating current rate via weighted sum of current and previous window counts) or a **Token Bucket** ($O(1)$ memory, storing only token count and timestamp) is substantially more memory-efficient.
 
 ---
 
@@ -1327,32 +1418,41 @@ CREATE TABLE idempotency_records (
     client_id VARCHAR(64) NOT NULL,
     endpoint VARCHAR(255) NOT NULL,
     request_hash CHAR(64) NOT NULL, -- SHA-256 hash of the request body
-    status VARCHAR(20) NOT NULL,    -- 'IN_PROGRESS', 'COMPLETED'
+    status VARCHAR(30) NOT NULL,    -- 'IN_PROGRESS', 'COMPLETED', 'FAILED', 'RECONCILIATION_REQUIRED'
     response_code INT,
     response_body TEXT,
+    locked_until TIMESTAMP WITH TIME ZONE NOT NULL, -- Lease expiration for worker crash recovery
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     expires_at TIMESTAMP WITH TIME ZONE NOT NULL
 );
 
 CREATE INDEX idx_idempotency_expiry ON idempotency_records(expires_at);
+CREATE INDEX idx_idempotency_locked ON idempotency_records(locked_until) WHERE status = 'IN_PROGRESS';
 ```
 
 #### The Atomic State Machine Lifecycle
-1. **Atomic Key Reservation:** Inside a database transaction, execute:
+1. **Atomic Key Reservation:** Inside a database transaction, attempt an atomic insert with a bounded execution lease:
    ```sql
-   INSERT INTO idempotency_records (idempotency_key, client_id, endpoint, request_hash, status, expires_at)
-   VALUES (:key, :clientId, :endpoint, :hash, 'IN_PROGRESS', NOW() + INTERVAL '24 HOURS')
+   INSERT INTO idempotency_records (idempotency_key, client_id, endpoint, request_hash, status, locked_until, expires_at)
+   VALUES (:key, :clientId, :endpoint, :hash, 'IN_PROGRESS', NOW() + INTERVAL '30 SECONDS', NOW() + INTERVAL '24 HOURS')
    ON CONFLICT (idempotency_key) DO NOTHING;
    ```
-2. **Evaluate Collision:**
-   - If row was successfully inserted: Current worker holds the lock. Proceed to business logic.
-   - If row already exists:
-     - Check `request_hash`: If the hash differs, the client reused the key for a different payload. Return `422 Unprocessable Content` or `400 Bad Request`.
-     - Check `status`:
-       - If `IN_PROGRESS`: A concurrent duplicate request is currently executing. Return `409 Conflict` with `Retry-After: 5`.
-       - If `COMPLETED`: Safe replay! Return the cached `response_code` and `response_body` with header `Idempotent-Replayed: true`.
-3. **Commit Outcome:** Upon successful business execution, update status to `COMPLETED` and record the response body.
-4. **Failure Cleanup:** If the business operation throws an unhandled error, delete the in-progress record so the client can safely retry.
+2. **Evaluate Reservation & Collision:**
+   - **Reservation Won:** If a row was inserted, the current worker holds the execution lease. Proceed to business logic.
+   - **Collision (Key Already Exists):**
+     - **Payload Hash Mismatch:** If `request_hash` differs from the stored record, the client reused an idempotency key with a mutated payload. Return `422 Unprocessable Content` or `400 Bad Request`.
+     - **`IN_PROGRESS` (Active Lease):** If `status = 'IN_PROGRESS'` and `locked_until > NOW()`, a concurrent duplicate request or original worker is actively executing. Return `409 Conflict` (with recommended `Retry-After: 5`).
+     - **`COMPLETED`:** Safe deterministic replay! Return the cached `response_code` and `response_body` with header `Idempotent-Replayed: true`.
+     - **`RECONCILIATION_REQUIRED`:** A previous worker encountered an ambiguous timeout with an external downstream provider. Return `409 Conflict` or `503 Service Unavailable` indicating the transaction is awaiting verification.
+3. **Execution Boundaries & Downstream Idempotency:**
+   - **Local Database Transactions:** Keep local state mutations within a transactional boundary.
+   - **External Side Effects (Payment APIs, Webhooks):** When calling external payment gateways (e.g., Stripe, Adyen), the server **must propagate a downstream provider-side idempotency key** derived deterministically from the client key (e.g., `Stripe-Idempotency-Key: pay_` + `:key`).
+4. **Failure Handling, Worker Crashes, and Reconciliation:**
+   - **Why Deleting `IN_PROGRESS` on Exception Is Unsafe:** A naive pattern deletes the idempotency record whenever any exception is thrown. **This is dangerous if external side effects were initiated!** If a worker dispatches a payment to an external API and experiences a local network timeout waiting for the response, deleting the key allows the client's next retry to dispatch a *second* charge, causing duplicate financial transactions.
+   - **Pure Local Failures:** If an exception occurs strictly within the local database transaction *before* any external RPCs, rolling back the transaction and deleting or marking the record `FAILED` is safe.
+   - **Ambiguous External Failures:** If an error occurs during or after external dispatch, transition the status to `RECONCILIATION_REQUIRED`. A background recovery worker or webhook processor must query the external provider using the provider-side idempotency key to determine if the charge succeeded before completing or failing the transaction.
+   - **Worker Crashes & Leases:** If a server process abruptly dies, `locked_until` ensures the key is not permanently blocked. Once the lease expires, subsequent retries or recovery workers can detect the dead worker and trigger reconciliation.
+   - **No Exact-Once Execution Guarantee:** In distributed systems, network partitions and arbitrary failures make true "exactly-once" external execution physically impossible (the Two Generals' Problem). Idempotency guarantees **at-most-once or effectively-once execution** through deterministic deduplication and state reconciliation.
 
 ---
 
@@ -1378,22 +1478,30 @@ Where $B$ is base backoff (e.g., 500 ms) and $M$ is maximum ceiling (e.g., 30 se
 |                    | ORDER BY created_at DESC           | WHERE (created_at, id) < (:c, :id) |
 |                    | LIMIT 20 OFFSET 100000;            | ORDER BY created_at DESC, id DESC  |
 |                    |                                    | LIMIT 20;                          |
-| Performance Engine | O(N) Engine Scan. Scans and        | O(log N) B-Tree Seek. Directly     |
-| Complexity         | discards 100,000 rows in memory!   | navigates index to cursor position.|
-| Stability Under    | UNSTABLE. Inserting a new row at   | STABLE. Immune to insertions and   |
-| Concurrent Writes  | row 0 shifts all pages, causing    | deletions; exact position anchor   |
-|                    | duplicate or missing rows!         | guarantees zero item drift.        |
-| Deep Paging Cost   | Catastrophic at high offsets.      | Instantaneous at arbitrary depths. |
+| Performance Engine | O(N) Engine Scan. Scans and        | O(log N) B-Tree Seek (requires     |
+| Complexity         | discards 100,000 rows in memory!   | composite index on sort columns).  |
+| Stability Under    | UNSTABLE. Inserting a new row at   | STABLE for append-only streams with|
+| Concurrent Writes  | row 0 shifts all pages, causing    | unique tie-breakers; avoids offset |
+|                    | duplicate or missing rows!         | item drift.                        |
+| Deep Paging Cost   | Catastrophic at high offsets.      | Bounded B-Tree seek at any depth.  |
 | Random Access      | Supports jumping directly to page 5| Sequential only (Next / Prev).     |
 +--------------------+------------------------------------+------------------------------------+
 ```
 
-#### Keyset Cursor Implementation
+#### Keyset Cursor Implementation and Guarantees
 An opaque cursor is created by Base64URL-encoding the primary sort column combined with a unique tie-breaker (e.g., `id`):
 ```
 Cursor String: Base64URL("2026-10-14T10:00:00Z|ord_99482")
 ```
 When fetching the next page, the client supplies `?cursor=MjAyNi0xMC0xNFQxMDowMDowMFp8b3JkXzk5NDgy`. The server decodes the values and applies them directly to the B-Tree index predicate.
+
+#### Critical Engineering Constraints of Keyset Pagination
+Keyset pagination is not a magic performance bullet; its stability and efficiency depend on specific database conditions:
+1. **Mandatory Composite Index:** Keyset pagination requires a composite B-Tree index matching the exact columns and sort order of the query (e.g., `CREATE INDEX idx_orders_created_id ON orders(created_at DESC, id DESC)`). Without this index, the query engine cannot seek the cursor position and falls back to an expensive sequential scan and filesort.
+2. **Strictly Unique, Immutable Tie-Breaker:** Non-unique sort keys (such as `created_at` or `timestamp`, which frequently duplicate under concurrent write bursts) **must be paired with an immutable unique tie-breaker** (like primary key `id`). Without an immutable tie-breaker, rows sharing identical timestamps across page boundaries are skipped or duplicated.
+3. **Mutable Sort Keys:** If sorting by a mutable field (`updated_at`, `ranking_score`, or `priority`), updating an entity while a user pages through results moves that row across the cursor boundary, causing it to appear on multiple pages or disappear entirely. For mutable datasets, keyset sorting should anchor on immutable creation timestamps or require snapshot isolation.
+4. **Dynamic Filter Membership:** When querying with state filters (e.g., `WHERE status = 'PENDING'`), rows changing state between page requests naturally enter or exit the stream. Keyset cursors anchor position within the index, not an immutable snapshot.
+5. **Seek Cost Realism:** While locating the cursor entry in a suitable B-Tree index is $O(\log N)$, overall query latency remains bounded by buffer cache hits, row fetching I/O, and MVCC visibility checks under write contention.
 
 ---
 
@@ -1406,11 +1514,16 @@ When fetching the next page, the client supplies `?cursor=MjAyNi0xMC0xNFQxMDowMD
 | Adding a new endpoint route.       | Renaming or removing an endpoint.  |
 | Adding an optional query parameter.| Renaming or removing an existing   |
 | Adding a new field to response JSON| response JSON property.            |
-| Expanding enum values (when clients| Changing a field's data type       |
-| use tolerant readers).             | (e.g., string -> array).           |
-| Adding optional request body field.| Making an optional field mandatory.|
+| (when clients ignore unknowns).    | Changing a field's data type       |
+| Adding optional request body field.| (e.g., string -> array).           |
+| Adding a new optional header.      | Making an optional field mandatory.|
 +------------------------------------+------------------------------------+
 ```
+
+#### The Enum Expansion Hazard
+A subtle and notorious breaking change is adding a new value to an existing enum field (e.g., adding `STATUS_CANCELLED` to an `OrderStatus` enum in response JSON).
+- **Why It Breaks Clients:** Strongly-typed clients in Java (Jackson), Swift (`Decodable`), or C# (`System.Text.Json`) map JSON strings directly to strict enum constants. When an un-updated client deserializes a newly introduced enum value, it throws an unhandled deserialization error (e.g., `InvalidFormatException`) and crashes the client screen.
+- **Defensive Design:** Treat enum expansion as a breaking change unless clients explicitly implement **tolerant readers** (e.g., Jackson's `READ_UNKNOWN_ENUM_VALUES_AS_NULL` or `@JsonEnumDefaultValue`). When backwards compatibility is required, prefer extensible string codes or versioned endpoints.
 
 ---
 
@@ -1600,8 +1713,8 @@ Security verification requires testing at distinct boundaries:
 ### 16.2 HTTP Status Code Decision Tree
 - Did the request succeed?
   - Yes, and returning body: `200 OK`
-  - Yes, and created new resource: `201 Created` + `Location`
-  - Yes, accepted for async background task: `202 Accepted` + `Location`
+  - Yes, and created new resource: `201 Created` (with `Location` when new sub-resource URI is created)
+  - Yes, accepted for async background task: `202 Accepted` (with polling `Location`)
   - Yes, but returning no payload: `204 No Content`
 - Did the client fail?
   - Malformed JSON / Syntax error: `400 Bad Request`
@@ -1611,15 +1724,15 @@ Security verification requires testing at distinct boundaries:
   - Unsupported HTTP verb on route: `405 Method Not Allowed` + `Allow`
   - Business state conflict / Optimistic lock mismatch: `409 Conflict`
   - Resource permanently retired: `410 Gone`
-  - ETag mismatch on conditional write: `412 Precondition Failed`
+  - ETag mismatch on conditional write: `412 Precondition Failed` (use `409`/`422` for JSON Patch test failures)
   - Payload too large: `413 Content Too Large`
   - Wrong Content-Type sent: `415 Unsupported Media Type`
   - Well-formed JSON, but business validation failed: `422 Unprocessable Content`
-  - Velocity threshold exceeded: `429 Too Many Requests` + `Retry-After`
+  - Velocity threshold exceeded: `429 Too Many Requests` (`Retry-After` recommended)
 - Did the server fail?
   - Unhandled application code crash: `500 Internal Server Error`
   - Upstream service down / Connection refused: `502 Bad Gateway`
-  - Overloaded / Circuit breaker open: `503 Service Unavailable` + `Retry-After`
+  - Overloaded / Circuit breaker open: `503 Service Unavailable` (`Retry-After` optional)
   - Upstream read timeout elapsed: `504 Gateway Timeout`
 
 ### 16.3 REST Resource Design Rules
@@ -1652,12 +1765,12 @@ Security verification requires testing at distinct boundaries:
 
 ### 16.6 Browser Security Boundary Matrix
 ```
-+-------------------------------------------------------------------------------+
-| SOP:   Blocks browser scripts from reading cross-origin HTTP responses.       |
-| CORS:  Relaxes SOP via headers. NOT security for the API! Bypassed by cURL.   |
-| CSRF:  Attacker exploits auto-attached browser cookies. Defend with SameSite. |
-| XSS:   Attacker runs JS in trusted origin. Defend with Output Encoding & CSP. |
-+-------------------------------------------------------------------------------+
++-----------------------------------------------------------------------------------------------+
+| SOP:   Blocks browser scripts from reading cross-origin HTTP responses.                       |
+| CORS:  Relaxes SOP via headers. Governs READING responses, not SENDING. Never prevents CSRF!  |
+| CSRF:  Attacker exploits auto-attached browser cookies. Defend with SameSite, tokens, headers.|
+| XSS:   Attacker runs JS in trusted origin. Defend with Output Encoding, CSP, & HttpOnly.      |
++-----------------------------------------------------------------------------------------------+
 ```
 
 ### 16.7 Rate Limiting Algorithm Decision Table
@@ -1676,17 +1789,17 @@ Security verification requires testing at distinct boundaries:
 ### 16.8 Idempotency-Key Design Checklist
 - [ ] Client provides unique key in `Idempotency-Key` header.
 - [ ] Server computes SHA-256 hash of request body to detect payload tampering.
-- [ ] Key reserved atomically via database lock or unique constraint (`IN_PROGRESS`).
+- [ ] Key reserved atomically via database unique constraint with execution lease timeout (`IN_PROGRESS`).
 - [ ] Concurrent duplicate request receives `409 Conflict`.
-- [ ] Completed request caches status code and response body.
-- [ ] Replayed request returns cached response with `Idempotent-Replayed: true`.
-- [ ] Server failure removes in-progress reservation to enable client retries.
+- [ ] Provider-side idempotency keys propagated downstream to external payment gateways.
+- [ ] Local transaction aborts safely release or fail reservation; ambiguous external failures transition to `RECONCILIATION_REQUIRED` (never delete in-progress records unconditionally).
+- [ ] Completed request caches status code and response body for safe deterministic replay (`Idempotent-Replayed: true`).
 
 ### 16.9 Common Interview Traps
-1. **"CORS protects my API from hackers."** -> False. CORS is a browser-only restriction. Non-browser clients ignore it.
-2. **"Base64URL encodes JWTs, so they are encrypted."** -> False. Base64 is encoding, not encryption. Anyone can decode and read claims.
+1. **"CORS protects my API from hackers."** -> False. CORS is a browser-only response-reading restriction. Non-browser clients ignore it, and simple cross-origin requests still execute on the server.
+2. **"Base64URL encodes JWTs, so they are encrypted."** -> False. Base64 is encoding, not encryption. Anyone can decode claims. Decoding an ID token is NOT validating it.
 3. **"We use UUIDs, so we don't need BOLA authorization checks."** -> False. Obscurity is not authorization. Any leaked UUID exposes the object.
-4. **"PUT and PATCH are interchangeable."** -> False. PUT is complete replacement; PATCH is partial modification.
-5. **"Password hashing with SHA-256 is safe if salted."** -> False. SHA-256 is too fast on GPUs. Use memory-hard Argon2id or bcrypt.
-6. **"Retries guarantee exactly-once execution."** -> False. Retries without idempotency keys cause duplicate execution.
-7. **"Client timeouts mean the server failed."** -> False. The server may have committed the transaction before the network dropped the response.
+4. **"PUT and PATCH are interchangeable."** -> False. PUT is complete state replacement (omitted fields reset); PATCH is partial modification.
+5. **"Password hashing with SHA-256 is safe if salted."** -> False. SHA-256 is fast on GPUs. Use memory-hard Argon2id or bcrypt, benchmarked on production hardware.
+6. **"Retries guarantee exactly-once execution."** -> False. Distributed networks cannot physically achieve exactly-once execution across network partitions; idempotency provides at-most-once or effectively-once execution.
+7. **"Client timeouts mean the server failed."** -> False. The server may have committed the transaction before the network dropped the response. Safe retries demand idempotency keys.
