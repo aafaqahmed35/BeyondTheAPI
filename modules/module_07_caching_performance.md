@@ -409,7 +409,10 @@ A pervasive beginner bug is attempting to **update** the cache on writes (`SET K
    DATABASE VALUE = 'B'                  CACHE VALUE = 'A'  <-- PERMANENT DESYNCHRONIZATION!
 ```
 
-Because network delays and thread scheduling vary, Thread 1's cache write can arrive *after* Thread 2's cache write, even though Thread 2 won the database race. Deleting the key on write ensures that subsequent readers always pull the latest committed database state on their next miss.
+Because network delays and thread scheduling vary, Thread 1's cache write can arrive *after* Thread 2's cache write, even though Thread 2 won the database race. Deleting the key on write ensures that subsequent readers pull the latest committed database state on their next miss.
+
+> [!WARNING]
+> **Key Invalidation Does Not Eliminate Every Race:** While deleting on write eliminates concurrent write-write order races, it does **not** eliminate the concurrent read-miss/write interleave race (where a slow reader reads an old DB record, the writer commits and deletes the cache key, and the slow reader writes back the old record). That race requires versioned compare-and-set or watermark tombstones (detailed in Section 4.3).
 
 ---
 
@@ -419,7 +422,7 @@ Because network delays and thread scheduling vary, Thread 1's cache write can ar
 | :--- | :--- | :--- | :--- | :---: | :--- | :--- |
 | **Cache-Aside** | App checks cache; on miss, loads from DB and populates cache. | App writes to DB, then invalidates (`DEL`) cache key. | Eventual. Resilient to cache crashes. | **Zero** (DB is always written first). | Low (Standard backend application code). | General web APIs, variable read patterns, systems with mixed entities. |
 | **Read-Through** | App requests entity from cache library; library loads from DB on miss transparently. | Independent of read path (often paired with Write-Through). | Eventual. Encapsulated in caching plugin. | **Zero** | Moderate (Requires DB plugin/provider integration). | Standardized data access layers where caching is hidden behind an ORM/repository interface. |
-| **Write-Through** | Identical to Read-Through. | App writes to cache; cache synchronously writes to DB before returning success. | High. Cache and DB are always synchronized. | **Zero** | Moderate to High | Workloads where written data is immediately re-read by other clients (e.g., active user status). |
+| **Write-Through** | Identical to Read-Through. | App writes to cache; cache synchronously writes to DB before returning success. | High perceived freshness, but **no cross-system 2PC atomicity**. If DB write fails, cache and DB diverge unless compensated. | **Zero** (if DB write succeeds before ACK). | Moderate to High | Workloads where written data is immediately re-read by other clients (e.g., active user status). |
 | **Write-Behind (Write-Back)** | Identical to Read-Through. | App writes to cache; cache acknowledges immediately. Async worker batches writes to DB. | Eventual. High temporary divergence between cache and DB. | **CRITICAL** (If cache crashes before async DB flush, committed data is lost permanently). | Very High (Requires durable message queuing, dead-letter queues, reconciliation). | Write-heavy ingestion, analytics event counters, gaming leaderboards where throughput supersedes absolute durability. |
 | **Refresh-Ahead** | App reads from cache. Cache automatically evaluates access frequency and reloads expiring keys. | Decoupled (Cache-Aside or Write-Through). | High freshness for hot keys. | **Zero** | High (Requires predictive access modeling and background polling threads). | Predictably hot items (e.g. homepage featured products, market indices) where read misses must never occur. |
 
@@ -612,11 +615,11 @@ Result: The window for the race condition extends across the entire duration of 
 #### 2. Short Safety-Net TTLs
 Even if an invalidation race occurs and stale data is written to the cache, a bounded TTL (e.g., 60 seconds to 5 minutes) guarantees that the inconsistency has an absolute expiration ceiling. The system exhibits **bounded staleness**.
 
-#### 3. Versioned Cache Keys and Compare-and-Set
-Attach a monotonic entity version number or microsecond timestamp to the entity schema in PostgreSQL. When writing back to Redis on a cache miss, utilize a Redis Lua script to perform a conditional compare-and-set:
+#### 3. Versioned Cache Keys and Compare-and-Set (CAS)
+Attach a monotonic entity version number or microsecond timestamp to the entity schema in PostgreSQL. When writing back to Redis on a cache miss, an application can utilize a Redis Lua script to perform a conditional compare-and-set:
 
 ```lua
--- Versioned write-back script: updates ONLY if new_version > existing_version
+-- Naive Versioned write-back script: updates ONLY if new_version > existing_version
 local existingVersion = tonumber(redis.call('HGET', KEYS[1], '_version') or '0')
 local newVersion = tonumber(ARGV[2])
 
@@ -628,7 +631,16 @@ else
     return 0 -- Stale write rejected!
 end
 ```
-If Request A attempts to write back Version 1 after Request B has already committed Version 2, the Lua script rejects Request A's write, preserving cache integrity.
+
+> [!CAUTION]
+> **The Critical Deleted-Key Flaw of Naive CAS:**
+> The naive script above **fails** if Request B invalidated the cache by deleting the key (`DEL cache:user:42`)!
+> When a key is deleted, Redis purges all version metadata. When delayed Request A arrives with stale Version 1, `redis.call('HGET', ...)` returns `nil`. The script evaluates `tonumber(nil or '0')`, yielding `0`. Because $1 > 0$, the script blindly writes stale Version 1 into the empty key!
+>
+> **Defensible Solutions in Production:**
+> 1. **Version Watermark Tombstones:** When invalidating, the application or CDC worker does not simply delete the key; it records an invalidation watermark tombstone (e.g. `SET cache:user:42:ver 2 EX 30`). The write-back Lua script checks BOTH the payload hash and the watermark key (`KEYS[2]`). If `incoming_version < watermark_version`, the stale write is rejected even though the payload cache is empty!
+> 2. **Leases / Generation Tokens:** When Request A experiences a cache miss, Redis issues a short-lived 64-bit generation lease token. If Request B invalidates the key, all outstanding leases for that key are invalidated. When Request A attempts to write back, Redis verifies that the lease is still valid; if invalidated, the write is aborted.
+> 3. **CDC Log-Driven Populators:** Bypasses application write-back entirely. Readers only read from cache; all cache updates are performed by a single asynchronous consumer stream strictly ordered by the database WAL.
 
 #### 4. The Transactional Outbox & Event-Driven Invalidation
 In microservice architectures, cache invalidation should not rely on transient application thread memory. Instead, use the **Transactional Outbox Pattern** (from Module 5):
@@ -678,17 +690,15 @@ Redis does not spawn a separate OS timer thread for every expiring key. Tracking
 Whenever a client issues any read or write command accessing a key (`GET`, `HGET`, `EXISTS`), Redis inspects the key's metadata dictionary. If an expiration timestamp exists and `current_time >= expires_at`, Redis destroys the key immediately, reclaims memory, and returns `nil` to the client.
 
 #### 2. Active / Periodic Expiration (Background Sampling)
-If keys are written with a TTL but never accessed again, passive expiration would allow them to leak memory indefinitely. To prevent this, Redis runs an internal periodic cron loop (`serverCron`) 10 times per second (`hz 10`):
-1. It randomly samples **20 keys** from the set of keys configured with an expiration.
-2. It deletes all sampled keys that have expired.
-3. If **more than 25%** (5 keys) of the sample were expired, Redis does not wait for the next cron cycle—it immediately repeats Step 1 in a tight loop.
-4. To protect system responsiveness, the loop is capped by an adaptive CPU time limit (typically 25% of the CPU slice / 25 milliseconds) to prevent blocking the single-threaded event loop.
+If keys are written with a TTL but never accessed again, passive expiration would allow them to leak memory indefinitely. To prevent this, Redis implements an active expiration engine operating via two distinct cycles:
+- **Slow Cycle (`serverCron`):** Executes 10 times per second (`hz 10`). It randomly samples **20 keys** (`ACTIVE_EXPIRE_CYCLE_LOOKUPS_PER_LOOP`) from the dictionary of expiring keys. If an expired key is found, it is deleted. If **more than 25%** (5 keys) of the sampled batch were expired, Redis immediately repeats the sampling in a loop. To preserve server responsiveness, this loop is capped by an adaptive CPU time limit (default 25% of the CPU cycle, or ~25 milliseconds) so it cannot starve client command execution.
+- **Fast Cycle (`beforeSleep`):** Before the single-threaded event loop enters kernel polling sleep (`epoll_wait`/`kqueue`), Redis executes a short burst of active expiration. This fast cycle is capped by a strict 1-millisecond deadline to guarantee ultra-low latency for incoming requests.
 
 ---
 
 ### 5.3 Memory Limits and Eviction Policies
 
-When Redis reaches its configured `maxmemory` threshold and a client issues a memory-allocating command (`SET`, `HSET`, `LPUSH`), Redis evaluates its configured `maxmemory-policy`:
+When Redis reaches its configured `maxmemory` threshold and a client issues a memory-allocating command (`SET`, `HSET`, `LPUSH`), Redis synchronously evaluates its configured `maxmemory-policy`:
 
 | Eviction Policy | Candidates Evaluated | Eviction Algorithm | Behavior When All Keys Exhausted | Recommended Production Use Case |
 | :--- | :--- | :--- | :--- | :--- |
@@ -702,13 +712,12 @@ When Redis reaches its configured `maxmemory` threshold and a client issues a me
 | **`volatile-ttl`** | Only keys with TTL | Shortest Remaining TTL | Evicts keys with the nearest upcoming expiration timestamp. | Workloads where shortest-lived entries represent least valuable data. |
 
 #### The Mechanics of Approximated LRU vs. LFU
-To save memory, Redis does **not** implement true academic LRU using a doubly linked list, which would require two 64-bit pointers (16 bytes) per key. Instead, Redis allocates a compact **24-bit timestamp clock** inside each Redis Object (`robj`).
+To save memory, Redis does **not** implement true academic LRU using a doubly linked list, which would require two 64-bit pointers (16 bytes) per key. Instead, Redis allocates a compact **24-bit field** inside each Redis Object (`robj`).
 
-During eviction, Redis samples $N$ random keys (configured by `maxmemory-samples`, default 5), evaluates their 24-bit idle times, and evicts the single key with the largest idle time. At `maxmemory-samples 10`, Redis LRU approximation closely tracks theoretical true LRU with negligible memory overhead.
-
-In **LFU mode**, those 24 bits are partitioned into:
-- **16 bits:** Last decay time (minutes).
-- **8 bits:** Logarithmic access counter (values 0–255). The counter increments probabilistically based on current value and decays over time, preventing historic traffic spikes from permanently pinning obsolete keys in memory.
+- **In LRU Mode:** These 24 bits store a timestamp clock (resolution in seconds). During eviction, Redis samples $N$ random keys (configured by `maxmemory-samples`, default 5), evaluates their 24-bit idle times against the current global clock, and evicts the key with the largest idle time. At `maxmemory-samples 10`, Redis LRU approximation closely tracks theoretical true LRU with negligible memory overhead.
+- **In LFU Mode (Introduced in Redis 4.0):** Those 24 bits are partitioned into:
+  - **16 bits (Last Decay Time - LDT):** Lower 16 bits of current minute timestamp, used to decay the counter over time.
+  - **8 bits (Logistic Counter - LOG_C):** A Morris logarithmic counter (values 0–255). Rather than incrementing on every access, the counter increments probabilistically ($\frac{1}{\text{counter} \times \text{lfu-log-factor} + 1}$). Under inactivity, the counter decays based on `lfu-decay-time`, preventing historic bursts from permanently shielding obsolete keys from eviction.
 
 ---
 
@@ -906,7 +915,11 @@ Because Redis command execution is single-threaded, any command with $O(N)$ comp
 +---------------------------------------------------------------------------------------+
 ```
 
-#### Big Keys and Hot Keys
+#### Big Keys, Hot Keys, and SCAN Mechanics
+- **SCAN Operational Invariants:** `SCAN cursor [MATCH pattern] [COUNT count]` provides non-blocking chunked iteration across the keyspace:
+  - `COUNT` is a work-effort **hint**, not a guarantee of returned element count. A single `SCAN` invocation may return 0 keys while returning a non-zero cursor!
+  - Iteration is complete only when the returned cursor equals `'0'`.
+  - **Progressive Rehashing & Duplicate Keys:** Because hash tables dynamically expand and shrink, keys can be returned multiple times across cursor steps. Client applications must maintain a deduplication set if unique keys are required.
 - **Big Key:** A single key containing a massive value (e.g. a 50MB string or a List with 2,000,000 elements). Big keys cause severe memory fragmentation, network interface saturation, and slow deallocation on eviction. Identify via `redis-cli --bigkeys`.
 - **Hot Key:** A key that receives extreme query frequency (e.g. 50,000 QPS on `cache:homepage:featured`). Because Redis partitions clusters by key hash slots, a single hot key concentrates all traffic onto one physical CPU core of one Redis shard. Identify via `redis-cli --hotkeys` (requires LFU maxmemory-policy).
   - **Mitigation:** Spread hot keys by appending random partition suffixes (`featured:1` ... `featured:8`) and having clients read from random shards, or cache hot keys locally in an L1 in-process cache.
@@ -928,15 +941,19 @@ Redis can operate as a pure in-memory cache with persistence disabled, or as a s
      cloning latency spikes (~50-200ms).
 
 2. AOF (APPEND-ONLY FILE)
-   Logs every write command to disk in RESP format.
+   Logs every write command to disk in RESP format (Redis 7+ uses Multi-Part AOF).
    - Durability Modes:
      * appendfsync always: fsync() after every write (ultra-safe, severe disk I/O hit).
      * appendfsync everysec: fsync() once per second in background thread (Standard).
      * appendfsync no: OS controls buffer flush.
-   - Pros: Maximum 1 second of data loss under 'everysec'.
+   - Pros: Maximum 1 to 2 seconds of data loss under 'everysec'.
    - Cons: Larger file size; slower restart recovery. Requires background rewrite
      (BGREWRITEAOF) to compact historical command logs.
 ```
+
+> [!WARNING]
+> **Semi-Durability vs. Relational ACID Durability:**
+> Redis persistence and asynchronous replication do **not** equal relational ACID durability. Under `appendfsync everysec`, if disk I/O stalls, Redis can delay writes and lose up to 2 seconds of mutations during an OS crash. Furthermore, standard Redis cluster replication is **asynchronous**; a failover to a replica after an abrupt primary crash will lose any writes that were not yet transmitted over the wire. Redis is an ultra-fast in-memory cache and data-structure server, not a distributed ACID datastore.
 
 ---
 
@@ -985,40 +1002,78 @@ In Java, this is implemented cleanly via `CompletableFuture` / `ConcurrentHashMa
 public class SingleFlightCoordinator<K, V> {
     private final ConcurrentMap<K, CompletableFuture<V>> inFlight = new ConcurrentHashMap<>();
 
-    public V execute(K key, Function<K, V> loader) throws Exception {
-        CompletableFuture<V> future = inFlight.computeIfAbsent(key, k -> CompletableFuture.supplyAsync(() -> {
-            try {
-                return loader.apply(k);
-            } finally {
-                inFlight.remove(k); // Clean up once execution completes
+    public V execute(K key, Function<K, V> loader) throws ExecutionException, InterruptedException {
+        while (true) {
+            CompletableFuture<V> existing = inFlight.get(key);
+            if (existing != null) {
+                try {
+                    return existing.get();
+                } catch (CancellationException | ExecutionException e) {
+                    inFlight.remove(key, existing); // Stale failure cleanup
+                    continue;
+                }
             }
-        }));
-        return future.get(); // All concurrent threads block on the SAME future!
+
+            CompletableFuture<V> newFuture = new CompletableFuture<>();
+            CompletableFuture<V> prev = inFlight.putIfAbsent(key, newFuture);
+            if (prev != null) {
+                try {
+                    return prev.get();
+                } catch (CancellationException | ExecutionException e) {
+                    inFlight.remove(key, prev);
+                    continue;
+                }
+            }
+
+            try {
+                V result = loader.apply(key);
+                newFuture.complete(result);
+                return result;
+            } catch (Throwable t) {
+                newFuture.completeExceptionally(t);
+                throw new ExecutionException(t);
+            } finally {
+                // Invariant: 2-argument CAS remove only removes THIS exact future instance
+                inFlight.remove(key, newFuture);
+            }
+        }
     }
 }
 ```
 
-In Node.js, asynchronous Promise coalescing operates identically using an in-flight Promise registry:
+> [!NOTE]
+> **In-Process vs. Fleet-Wide Distributed Single-Flight:**
+> The `SingleFlight` constructs above are **in-process (pod-local)**. If your application runs across 10 Kubernetes pods, each pod will collapse its local concurrent misses into 1 query, resulting in 10 database queries (one per pod). Distributed single-flight across an entire fleet requires distributed coordination (e.g., Redis distributed mutex with leases, or NGINX edge request coalescing via `proxy_cache_use_stale updating`).
+
+In Node.js, asynchronous Promise coalescing operates identically using an in-flight Promise registry with exact-instance cleanup:
 ```typescript
 class SingleFlightCoalescer {
   private inFlight = new Map<string, Promise<any>>();
 
-  async execute<T>(key: string, loader: () => Promise<T>): Promise<T> {
+  execute<T>(key: string, loader: () => Promise<T>): Promise<T> {
     const existing = this.inFlight.get(key);
     if (existing) {
       return existing as Promise<T>; // Return shared in-flight Promise
     }
 
-    const promise = (async () => {
-      try {
-        return await loader();
-      } finally {
+    let promise: Promise<T>;
+    try {
+      // Promise.resolve().then(...) safely traps both synchronous throws and async rejections
+      const execution = Promise.resolve().then(() => loader());
+      promise = execution.finally(() => {
+        // Invariant: Only delete if the map still holds THIS exact in-flight promise instance!
+        if (this.inFlight.get(key) === promise) {
+          this.inFlight.delete(key);
+        }
+      });
+      this.inFlight.set(key, promise);
+      return promise;
+    } catch (syncErr) {
+      if (this.inFlight.get(key) === promise) {
         this.inFlight.delete(key);
       }
-    })();
-
-    this.inFlight.set(key, promise);
-    return promise;
+      throw syncErr;
+    }
   }
 }
 ```
@@ -1053,7 +1108,11 @@ Probability of Refresh
                Remaining TTL (Approaching Expiration)
 ```
 
-As the key nears expiration, the probability of any given read request triggering an asynchronous background refresh climbs exponentially. Under high traffic (e.g. 10,000 QPS), one single client will probabilistically trigger the refresh a few seconds *before* the key expires, repopulating the cache smoothly while all other clients continue reading valid cached data. The cache entry never actually experiences a hard miss!
+As the key nears expiration, the probability of any given read request triggering an asynchronous background refresh climbs exponentially. Under high traffic (e.g. 10,000 QPS), one single client will probabilistically trigger the refresh a few seconds *before* the key expires, repopulating the cache smoothly while all other clients continue reading valid cached data.
+
+> [!WARNING]
+> **XFetch Operational Limitations:**
+> While XFetch dramatically reduces stampede risk under steady high traffic, it does **not** provide a 100% guarantee that every key is refreshed before hard expiration. If traffic to the key is sparse right before expiration, if computation time $\delta$ suddenly spikes beyond the remaining TTL, or if the background worker encounters an exception, the key will expire and callers will experience a hard miss.
 
 ---
 
@@ -1122,8 +1181,15 @@ A **Bloom Filter** is a space-efficient probabilistic data structure used to tes
 ```
 
 #### Mathematical Invariants of Bloom Filters
-1. **Zero False Negatives:** If the Bloom filter returns `false`, the entity is **guaranteed** not to exist in the database. The application can immediately reject the request with HTTP 404 without querying either Redis or PostgreSQL!
+1. **Zero False Negatives (Under Strict Assumptions):** If the Bloom filter returns `false`, the entity is claimed not to exist.
 2. **False Positives Possible:** If the Bloom filter returns `true`, the entity **might** exist. The application proceeds to check the cache and database.
+
+> [!WARNING]
+> **Production Preconditions for Zero False Negatives:**
+> The mathematical guarantee of zero false negatives holds **only** under three strict operational preconditions:
+> 1. **Complete Initial Population:** Every existing entity in PostgreSQL was successfully hashed and registered in the bit array.
+> 2. **No Deletions:** Standard Bloom filters do **not** support deletions. If a user deletes their account from PostgreSQL, its bits cannot be cleared without corrupting other entries. Over time, deleted entities accumulate as permanent false positives. (Solutions: Counting Bloom Filters or periodic background rebuilds).
+> 3. **Synchronized Write Path:** If an entity is created in PostgreSQL but the server crashes before adding it to the Bloom filter (or if replication lag delays update), the Bloom filter will return `false` for a valid existing entity! This produces a **catastrophic False Negative** where legitimate users are rejected with 404s. Therefore, a Bloom filter is an optimization guard, not an authoritative source of truth.
 
 #### Sizing a Bloom Filter
 Given $n$ expected keys and a target false-positive probability $p$:
@@ -1147,8 +1213,20 @@ By allocating just **11.4 MB of memory** in Redis (via RedisBloom `BF.ADD` / `BF
 Module 06 established the security threat models of API rate limiting. Here, we examine the physical data-structure mechanics inside Redis:
 
 #### 1. Fixed-Window Counter
-- **Data Structure:** Redis String (`INCR` + `EXPIRE`).
-- **Mechanics:** Key represents the window boundary (e.g. `rate:user_123:2026-10-14-17:30`). An incoming request executes `INCR`. If the returned value is `1`, the client issues `EXPIRE 60`. If count exceeds limit, reject.
+- **Data Structure:** Redis String.
+- **The Crash Hazard of Naive `INCR` + `EXPIRE`:** In naive implementations, an app executes `INCR key`. If the count is 1, it issues `EXPIRE key 60`. If the app crashes, is killed, or suffers a network drop between `INCR` and `EXPIRE`, the key is created with **NO TTL**! It permanently lives in Redis without expiring, locking out the user indefinitely!
+- **Atomic Lua Solution:**
+```lua
+local current = redis.call('INCR', KEYS[1])
+if current == 1 then
+    redis.call('EXPIRE', KEYS[1], tonumber(ARGV[2]))
+end
+if current <= tonumber(ARGV[1]) then
+    return {1, current} -- Allowed
+else
+    return {0, current} -- Denied
+end
+```
 - **Trade-off:** Minimal memory ($O(1)$) and ultra-fast. Vulnerable to **boundary burst doubling** (a user sends 100 requests at 17:30:59 and 100 requests at 17:31:00, successfully executing 200 requests in 2 seconds).
 
 #### 2. Sliding-Window Log via Sorted Sets (ZSET)
@@ -1225,10 +1303,15 @@ Martin Kleppmann (author of *Designing Data-Intensive Applications*) famously pr
 ```
 
 #### The Solution: Monotonic Fencing Tokens
-A distributed lock service must issue a strictly increasing **fencing token** (e.g. token = 101, 102, 103) upon each acquisition. The storage tier (PostgreSQL / file system) must validate that incoming write requests present a fencing token higher than any previously observed token:
+A distributed lock service must issue a strictly increasing **fencing token** (e.g. token = 101, 102, 103) upon each acquisition:
 - Client 2 writes with `token = 102`. Database updates its `max_token = 102`.
 - Client 1 wakes up from GC and submits write with `token = 101`.
 - Database rejects Client 1's write: `ERROR: Stale fencing token 101 < 102`!
+
+> [!IMPORTANT]
+> **How Fencing Tokens are Obtained and Enforced:**
+> 1. **Redis Does Not Automatically Issue Fencing Tokens:** Standard `SET key token NX PX ttl` only provides mutual exclusion and a lease; it does not generate monotonic tokens. To obtain a fencing token in Redis, acquisition must atomically increment a dedicated monotonic counter key (via Lua script) alongside `SET NX`. In consensus-backed systems like Apache ZooKeeper or etcd, sequential znode versions (`zxid`) or `mod_revision` counters serve as monotonic fencing tokens.
+> 2. **Enforcement Lies in the Storage Tier, Not the Lock:** A distributed lock service *cannot* prevent a stalled client from waking up and issuing a network write. Correctness is achieved **only** because the protected downstream storage tier (e.g., PostgreSQL `UPDATE accounts SET balance = $1, fencing_token = $2 WHERE id = $3 AND fencing_token < $2`) evaluates and rejects writes bearing obsolete tokens!
 
 ---
 
@@ -1279,6 +1362,11 @@ public class OrderService {
     }
 }
 ```
+
+> [!NOTE]
+> **The Scope of `@Cacheable(sync = true)`:**
+> Setting `sync = true` activates **in-process (JVM-local) thread synchronization**. If 20 concurrent threads inside the same Spring Boot instance query the same missing key `#orderId`, only 1 thread executes `loadFromDatabase(orderId)` while the other 19 wait for the result.
+> **Critical Distributed Limitation:** `sync = true` does **NOT** synchronize across multiple application instances! If your service runs across 10 Kubernetes pods and a hot key expires, each of the 10 pods will execute a database query (resulting in 10 simultaneous queries to the database, one per pod). Achieving fleet-wide distributed single-flight requires distributed coordination (such as a Redis distributed lock with leases, or reverse-proxy coalescing via NGINX `proxy_cache_use_stale updating`).
 
 ---
 
@@ -1331,14 +1419,17 @@ export class ResilientCache {
     ttlSeconds: number = 300,
     timeoutMs: number = 50
   ): Promise<T> {
-    // 1. Race cache read against strict deadline
+    // 1. Race cache read against strict deadline with timer cleanup
     try {
-      const cachePromise = this.redis.get(key);
-      const timerPromise = new Promise<null>((_, reject) =>
-        setTimeout(() => reject(new Error('Cache timeout')), timeoutMs)
-      );
+      let timerId: NodeJS.Timeout;
+      const timeoutPromise = new Promise<null>((_, reject) => {
+        timerId = setTimeout(() => reject(new Error('Cache timeout')), timeoutMs);
+      });
 
-      const raw = await Promise.race([cachePromise, timerPromise]);
+      const raw = await Promise.race([this.redis.get(key), timeoutPromise]).finally(() => {
+        clearTimeout(timerId); // Prevent timer handle leaks in event loop!
+      });
+
       if (raw !== null) {
         return JSON.parse(raw) as T; // Cache Hit
       }
@@ -1348,6 +1439,7 @@ export class ResilientCache {
     }
 
     // 2. Fallback to primary database
+    // Warning: High-traffic clusters must evaluate circuit breaker state before database query!
     const freshData = await dbLoader();
 
     // 3. Best-effort async write-back (unawaited)
@@ -1360,6 +1452,11 @@ export class ResilientCache {
   }
 }
 ```
+
+> [!WARNING]
+> **Two Critical Timeout Realities in Node.js:**
+> 1. **`Promise.race()` Does NOT Cancel Background Operations:** In JavaScript, promises are not cancellable. When `timeoutPromise` rejects, the underlying `this.redis.get(key)` network socket read **continues running in the background** until socket closure or data arrival. A caller-side timeout gives latency control to the client, but does *not* relieve Redis or the network of work!
+> 2. **Fallback Overload Hazard & Circuit Breaking:** If Redis latency climbs under heavy load (e.g. 20,000 QPS) and requests begin timing out after 50ms, naively falling back to PostgreSQL will suddenly dump 20,000 QPS onto the relational database. Because database queries are 10x–50x slower, database connection pools (HikariCP / pg-pool) will instantly saturate, thread starvation will cascade across the cluster, and the entire API will experience a total outage. Production systems **must** pair cache timeouts with a **Circuit Breaker** (e.g. tripping after consecutive timeouts to fail-fast or return cached stale data, shielding the database).
 
 ---
 
@@ -1381,7 +1478,7 @@ Vary: Accept-Encoding, Origin
 - **`max-age=<seconds>`:** Freshness duration for client browsers. The browser will serve the cached copy from disk/RAM without issuing a network request for the specified duration.
 - **`s-maxage=<seconds>`:** Freshness duration specifically for **shared / intermediary caches** (CDNs, reverse proxies). Overrides `max-age` for CDNs while keeping browser caching short.
 - **`no-cache`:** **CRITICAL INTERVIEW DISTINCTION:** `no-cache` does **NOT** mean "do not cache"! It means: *"You may store this response, but you MUST revalidate with the origin server (using ETag or If-Modified-Since) before serving it to a client."*
-- **`no-store`:** The authoritative directive meaning: *"Do not write this response or request to non-volatile storage under any circumstances."* Mandatory for sensitive PII, banking credentials, and auth tokens.
+- **`no-store`:** Under RFC 9111 Section 5.2.2.5, `no-store` instructs that the cache **MUST NOT store any part of this response or the request that produced it in any storage tier** (neither volatile RAM nor persistent disk). Every request must round-trip to the origin. Mandatory for sensitive personal data, banking credentials, and cryptographic tokens.
 - **`public`:** Indicates that any intermediary (CDN, proxy) may cache the response.
 - **`private`:** Indicates that the response is intended solely for a single user (the browser). Shared CDNs must **never** store a `private` response.
 - **`stale-while-revalidate=<seconds>`:** Instructs the cache to immediately return a stale response if one is available, while asynchronously dispatching a background request to the origin to fetch fresh data.
@@ -1416,8 +1513,8 @@ CLIENT                                                           ORIGIN SERVER
   |<-------------------------------------------------------------------|
 ```
 
-- **Strong ETag (`"abc"`):** Guarantees byte-for-byte identity of the representation. Mandatory for byte-range requests (`206 Partial Content`).
-- **Weak ETag (`W/"abc"`):** Guarantees semantic equivalence (e.g. JSON fields ordered differently or whitespace reformatted). Valid for cache revalidation, invalid for byte-range requests.
+- **Strong ETag (`"abc"`):** Guarantees byte-for-byte binary identity of the representation. Mandatory for byte-range requests (`206 Partial Content`) and concurrency guards (`If-Match`).
+- **Weak ETag (`W/"abc"`):** Guarantees semantic equivalence (RFC 9110 Section 8.8.1). Valid for full-body `If-None-Match` revalidations (GET), but RFC 9110 Section 13.1.2 explicitly forbids weak ETags for byte-range requests (`Range: bytes=...`) or optimistic locking updates (`If-Match`).
 
 ---
 
@@ -1550,14 +1647,25 @@ Coordinated Omission (identified by Gil Tene) is a catastrophic measurement flaw
 ### Case Study 4: When NOT to Cache: Real-Time Financial Balance & Inventory Decrement
 - **Workload Profile:** Flash sale ticket purchase or banking balance transfer. 50,000 concurrent requests competing for the last 5 inventory seats.
 - **Freshness Requirement:** Strict Serializability / ACID Correctness. Overselling inventory or double-spending a balance results in financial and legal liability.
-- **Why Caching is Fatal:** Caching inventory counts in Redis introduces the lost-update race condition. Two concurrent pods read `stock = 1`, decrement to `0`, and write back, overselling the item.
-- **Correct Production Design:** **Do NOT Cache.** Route mutations directly to PostgreSQL utilizing atomic guarded SQL updates with row-level locks:
+- **Why Naive Caching is Fatal:** Caching inventory counts in an application-level Cache-Aside pattern introduces lost-update race conditions (e.g. concurrent read-modify-write cycles).
+- **Correct Production Design (Database Authority):** Route mutations directly to the primary relational database utilizing atomic guarded SQL updates:
 ```sql
 UPDATE inventory
 SET available_stock = available_stock - 1, version = version + 1
 WHERE product_id = 9021 AND available_stock >= 1;
 ```
-If the database updates 1 row, inventory was successfully reserved atomically. If 0 rows were updated, stock was exhausted. PostgreSQL WAL and page-level locks guarantee zero overselling.
+If the database updates 1 row, inventory was successfully reserved atomically. If 0 rows were updated, stock was exhausted. Correctness is guaranteed by the guarded `WHERE available_stock >= 1` predicate, PostgreSQL row-level tuple write-locks (`XMAX` tracking), check constraints (`CHECK (available_stock >= 0)`), and write-ahead logging (WAL) serialization—not page-level locks.
+
+- **High-Throughput Admission Control (Redis Pre-decrement with Durability Caveats):**
+In extreme flash sales (e.g. 500,000 requests competing for 100 items), routing all traffic directly to PostgreSQL would overwhelm connection pools. A common architectural compromise uses an atomic Redis Lua script for admission control. However, engineers must understand:
+> [!CRITICAL]
+> **Redis Decrement is NOT a Durable Reservation:**
+> 1. **Guarded Decrement:** The Redis Lua script must never decrement stock below zero on rejection (checking `available_stock >= requested_qty` before calling `DECRBY`).
+> 2. **The Lost-Reservation Hazard:** An in-memory Redis decrement does not guarantee atomicity with database writes or message publication. If the client or application pod crashes after the Redis decrement but before creating the database order, that inventory slot becomes stranded/lost (reducing apparent inventory without creating a sale).
+> 3. **Required Mitigations:** Production systems pairing Redis admission control with database checkout must implement:
+>    - **Durable Reservation Leases:** Reservations are stored with an expiration timestamp and token in a durable store.
+>    - **Compensating Transactions:** If the database write fails or times out, an explicit rollback increments Redis stock back.
+>    - **Reconciliation Workers:** Periodic background sweeps reconcile committed database orders against Redis inventory counters to restore unconsumed reservations.
 
 ---
 
@@ -1575,7 +1683,8 @@ Choose Cache-Aside for general-purpose web applications with unpredictable query
 ### Question 2: Why should you delete a cache key on database updates instead of updating it?
 **Model Answer:**
 Updating the cache on writes introduces concurrent **write-order race conditions**. Suppose Thread 1 updates the database with Value A, and concurrent Thread 2 updates the database with Value B. Due to thread scheduling, network jitter, or context switching, Thread 2 might write Value B to the cache first, followed by Thread 1 writing Value A to the cache second. The database now holds Value B, but the cache permanently holds Value A!
-Deleting the key on write eliminates this race: regardless of write ordering, the key is evicted, and the next incoming read loads the authoritative database state.
+Deleting the key on write eliminates this write-write ordering race: regardless of write ordering, the key is evicted, and the next incoming read loads the authoritative database state.
+**Important Boundary Qualification:** While deleting the cache key eliminates write-write ordering anomalies, it does **not** eliminate every invalidation race. Specifically, it does not prevent the classic read-miss / concurrent write race condition (see Question 3), where a concurrent reader fetches a stale database snapshot before the write commits and writes it back to the cache after the key deletion.
 
 ---
 
@@ -1588,9 +1697,11 @@ The classic race occurs when a read miss and a write interleave:
 4. Client B deletes the cache key.
 5. Client A resumes execution and writes its stale read (Value 1) back into the cache!
 Now the cache holds Value 1 while the DB holds Value 2.
-**Mitigations:**
+**Mitigations & Their Limits:**
 1. **Short TTLs:** Ensures stale data self-heals after a bounded window.
-2. **Versioned Cache Keys:** Entities store a monotonic version number in the DB. Writes to Redis utilize a Lua script to execute a Compare-and-Set: only update the cache if `new_version > cached_version`.
+2. **Versioned Cache Keys & The Deleted-Key CAS Flaw:** Entities store a monotonic version number in the DB. A naive compare-and-set (CAS) script checks `if new_version > cached_version then set end`.
+   *Critical Edge Case:* If the cache key has already been evicted or deleted, `cached_version` does not exist! A naive CAS script blindly creates the key with stale Value 1.
+   *Defensible Defense:* Production versioning requires **Version Watermarks (tombstones)** (e.g. keeping `user:101:version_watermark` with `SET version EX 300` on every DB write so even if the payload key is absent, writes with version < watermark are rejected), generation leases, or CDC-driven population.
 3. **Database Write First:** Ensures the race window is confined to the sub-millisecond gap between database commit and cache eviction.
 
 ---
@@ -1642,29 +1753,40 @@ Because the script is atomic, Client A can never delete a lock acquired by Clien
 ### Question 9: What is a Fencing Token, and why is a Redis distributed lock unsafe without one?
 **Model Answer:**
 A distributed lock cannot protect against long client process pauses (such as JVM Stop-The-World GC or OS paging). If Client 1 acquires a 30s lock, pauses for 35s in GC, its lease expires, and Client 2 acquires the lock. Both clients now believe they hold the lock!
-A **Fencing Token** is a monotonically increasing integer issued by the lock service upon every acquisition (e.g. 101, 102). When writing to the storage tier (e.g. PostgreSQL), the database checks that the incoming write's token is strictly greater than the highest token observed so far. When Client 1 wakes up and submits its write with token 101, the database rejects it because Client 2 already committed with token 102.
+A **Fencing Token** is a monotonically increasing integer issued upon every lock acquisition (e.g. 101, 102). When writing to the storage tier (e.g. PostgreSQL), the database validates that the incoming write presents a token strictly higher than any previously observed token. When Client 1 wakes up and submits its write with token 101, the database rejects it because Client 2 already committed with token 102.
+**How Tokens are Generated & Enforced:**
+1. **Redis Does Not Automatically Issue Fencing Tokens:** Standard Redis `SET lock_key uuid NX PX ttl` only provides mutual exclusion and a lease; it does *not* issue monotonic tokens. In Redis, you must explicitly generate a monotonic sequence (e.g., via an atomic Redis `INCR lock_epoch_counter` in a Lua script) or rely on consensus systems (like ZooKeeper `zxid` or etcd `mod_revision`).
+2. **Storage-Tier Enforcement:** The distributed lock itself cannot prevent a stalled client from issuing network writes. Correctness is achieved **exclusively** by the protected downstream storage system (e.g., PostgreSQL `UPDATE accounts SET balance = $1, last_fencing_token = $2 WHERE id = $3 AND last_fencing_token < $2;`) rejecting obsolete tokens.
 
 ---
 
-### Question 10: How do you implement a sliding-window rate limiter in Redis, and what is the member collision bug?
+### Question 10: How do you implement rate limiting in Redis, and what are the critical expiry and concurrency bugs?
 **Model Answer:**
-A sliding-window rate limiter uses a Redis Sorted Set (`ZSET`). Scores are epoch millisecond timestamps. To record a request, the app removes entries older than `now - window` via `ZREMRANGEBYSCORE`, checks current count with `ZCARD`, and inserts the new request with `ZADD`.
-**The Collision Bug:** If the member string is set to the timestamp alone (`ZADD key now now`), two requests arriving in the exact same millisecond have identical member names. Redis updates the score of the existing member instead of adding a new one! `ZCARD` fails to increment, allowing users to exceed rate limits.
-**The Fix:** Use a composite member string combining timestamp and a unique request nonce: `now .. ':' .. requestId`.
+Rate limiting in Redis typically utilizes two algorithms, each with distinct edge cases:
+1. **Fixed-Window Counter (`INCR` + `EXPIRE` Crash Window):**
+   A naive implementation issues `INCR key`. If count is 1, it issues `EXPIRE key 60`. If the application crashes or network drops between the two commands, the key is left with **no TTL**, permanently locking out the user!
+   *The Fix:* Use an atomic Lua script that executes `INCR` and sets `EXPIRE` atomically on the first count (`if current == 1 then redis.call('EXPIRE', ...) end`), or Redis 7+ `INCRBY` with options.
+2. **Sliding-Window Log via Sorted Sets (The Member Collision Bug):**
+   Uses a Redis `ZSET` where scores are epoch timestamps. Stale entries are pruned with `ZREMRANGEBYSCORE`, current count checked via `ZCARD`, and the new request added via `ZADD`.
+   *The Collision Bug:* If member strings are timestamps alone (`ZADD key now now`), two requests arriving in the exact same millisecond have identical member names. Redis updates the score of the existing member instead of adding a new one, failing to increment `ZCARD` and allowing users to exceed rate limits.
+   *The Fix:* Use a composite member string combining timestamp and a unique request nonce: `now .. ':' .. requestId`.
 
 ---
 
-### Question 11: In HTTP caching, what is the difference between `Cache-Control: no-cache` and `Cache-Control: no-store`?
+### Question 11: In HTTP caching, what is the difference between `Cache-Control: no-cache` and `Cache-Control: no-store`, and what are Weak ETag semantics?
 **Model Answer:**
-- `no-cache`: Instructs the client/proxy that it **may store** the response, but it **must revalidate** with the origin server (via `If-None-Match` or `If-Modified-Since`) before serving it. If the server returns `304 Not Modified`, the cached response is served.
-- `no-store`: Instructs the client/proxy that it **must not store** any part of the request or response in any cache or non-volatile storage. It is strictly fetched fresh from origin on every request. Used for sensitive personal, financial, and authentication data.
+- **`no-cache`:** Instructs the client/proxy that it **may store** the response, but it **must revalidate** with the origin server (via `If-None-Match` or `If-Modified-Since`) before serving it. If the server returns `304 Not Modified`, the cached response is served.
+- **`no-store`:** Under RFC 9111 Section 5.2.2.5, `no-store` mandates that the cache **MUST NOT store any part of either the request or response in any storage tier** (neither volatile RAM nor non-volatile disk). Every request must round-trip to origin. Mandatory for sensitive personal, financial, and authentication data.
+- **Weak ETag Semantics (`W/"..."`):** Under RFC 9110 Section 8.8.1, weak ETags indicate semantic equivalence rather than exact byte-for-byte octet identity (e.g. gzip vs brotli compressed payloads, or reordered JSON fields). Under RFC 9110 Section 13.1.2, weak ETags are valid for full-body `If-None-Match` cache revalidation, but are **strictly forbidden** for byte-range requests (`Range: bytes=...`) and optimistic concurrency updates (`If-Match`).
 
 ---
 
-### Question 12: Why is `@Cacheable` subject to the self-invocation proxy bypass trap in Spring Boot?
+### Question 12: Why is `@Cacheable` subject to the self-invocation proxy bypass trap in Spring Boot, and what is the scope of `sync = true`?
 **Model Answer:**
 Spring's declarative caching utilizes Spring AOP dynamic proxies. When an external bean calls `@Cacheable` method `foo()`, it invokes the proxy, which executes caching interceptor logic before delegating to the target bean.
 If method `bar()` inside the *same* class calls `this.foo()`, the call is an internal JVM method dispatch that completely bypasses the proxy wrapper. The caching annotations on `foo()` are ignored, and the method executes directly against the database every time.
+**The Scope of `@Cacheable(sync = true)`:**
+Setting `sync = true` activates **in-process (JVM-local) thread synchronization**. It ensures only one thread within *that specific JVM instance* computes a missing key while other threads wait. It does **NOT** provide distributed single-flight behavior across multiple application instances in a cluster. If 10 microservice pods experience a hot cache miss, all 10 pods will query the database simultaneously unless distributed coordination or edge coalescing is used.
 
 ---
 
@@ -1690,13 +1812,18 @@ Coordinated Omission occurs when a benchmarking tool measures latency by waiting
 
 ### Question 16: What is the XFetch algorithm, and how does it prevent cache stampedes?
 **Model Answer:**
-XFetch (Probabilistic Early Refresh) prevents cache stampedes without distributed locks. As a cached key approaches its expiration time, client read requests evaluate a probabilistic threshold formula: $-\beta \times \delta \times \ln(\text{Random}(0, 1)) > \text{TTL}_{\text{remaining}}$, where $\delta$ is the computation time. Under heavy traffic, as remaining TTL drops, the probability of triggering an asynchronous background refresh climbs exponentially. One client will probabilistically refresh the cache early, repopulating it before hard expiration so clients never experience a cache miss.
+XFetch (Probabilistic Early Refresh) prevents cache stampedes without distributed locks. As a cached key approaches its expiration time, client read requests evaluate a probabilistic threshold formula: $-\beta \times \delta \times \ln(\text{Random}(0, 1)) > \text{TTL}_{\text{remaining}}$, where $\delta$ is the computation time and $\beta > 0$ is an aggressiveness factor.
+Under heavy traffic, as remaining TTL drops, the probability of triggering an asynchronous background refresh climbs exponentially. One client will probabilistically refresh the cache early, repopulating it before hard expiration.
+**Operational Boundary:** XFetch significantly reduces stampede probability under continuous traffic, but it **cannot guarantee that every refresh completes before expiration**. If read traffic is sparse or drops to zero during the probability window, or if computation time $\delta$ suddenly spikes or the refresh worker crashes, the key will still expire and cause a normal cache miss.
 
 ---
 
-### Question 17: How should a backend application handle total Redis cluster outages without failing user requests?
+### Question 17: How should a backend application handle Redis outages, timeouts, and database fallback?
 **Model Answer:**
-By implementing **Defensive Degradation and Circuit Breaking**. All Redis interactions must be wrapped in strict network timeouts (e.g. 50ms) and try-catch blocks. If Redis throws a connection exception or timeout, the application logs an operational metric, trips a circuit breaker to stop querying Redis temporarily, and falls back to serving the request directly from the primary relational database. The cache must be treated as a performance accelerator, never a hard single point of failure for business continuity.
+By implementing **Defensive Degradation and Circuit Breaking**:
+1. **Timeouts and Timer Cleanup:** Wrap all Redis interactions in strict network timeouts (e.g. 50ms). In runtimes like Node.js, ensure timer handles are cleared (`clearTimeout`) to prevent event-loop timer leaks, and remember that `Promise.race` does *not* cancel the underlying Redis socket operation.
+2. **The Fallback Overload Hazard:** Naively redirecting cache misses to the primary database during a Redis outage will instantly dump tens of thousands of QPS onto PostgreSQL. Because database queries are 10x–50x slower and connection pools are limited (e.g. HikariCP with 20 connections), Little's Law dictates that connections will saturate, thread starvation will cascade, and the entire backend will collapse.
+3. **Defensive Architecture:** Wrap cache access in a Circuit Breaker (e.g. Resilience4j or Opossum). When Redis fails, the circuit opens to fail-fast. Instead of unconstrained database fallback, the system must apply origin rate limiting, serve stale cached snapshots (`stale-if-error`), or degrade gracefully with partial/cached default responses.
 
 ---
 
@@ -1706,11 +1833,16 @@ By implementing **Defensive Degradation and Circuit Breaking**. All Redis intera
 
 ---
 
-### Question 19: Explain why Bloom filters cannot have false negatives, but can have false positives.
+### Question 19: Explain why Bloom filters cannot have false negatives, but can have false positives, and state the required assumptions.
 **Model Answer:**
 A Bloom filter uses $k$ independent hash functions that map an item to $k$ bit indices in an array, setting those bits to `1`.
-- When querying an item, if **any** of the $k$ bits is `0`, the item could **never** have been inserted (because inserting it would have set all $k$ bits to `1`). Therefore, a return value of `false` has **zero probability of error (no false negatives)**.
-- If all $k$ bits are `1`, it is possible that different previously inserted items happened to set those same bits to `1` by coincidence. Therefore, a return value of `true` carries a calculable **false positive probability**.
+- When querying an item, if **any** of the $k$ bits is `0`, the item could **never** have been inserted (because inserting it would have set all $k$ bits to `1`).
+- If all $k$ bits are `1`, it is possible that different previously inserted items happened to set those same bits to `1` by coincidence (a false positive).
+**Strict Preconditions for the Zero-False-Negative Guarantee:**
+A Bloom filter has zero false negatives **only if**:
+1. **Complete Population:** All existing database records were correctly inserted into the filter.
+2. **No Deletions:** Standard Bloom filters do not support deletion. If records are deleted from the database, the filter cannot remove them without risking unset bits that cause false negatives for other records.
+3. **Synchronous Write-Path Updates:** Newly created records must be added to the Bloom filter before or synchronously with database commits. If an entity is queried before the filter receives the write, the filter returns `false` (does not exist) for a record that *does* exist in the database—yielding an apparent false negative! A Bloom filter is not authoritative when its membership state is stale or incomplete.
 
 ---
 
@@ -1734,9 +1866,13 @@ Memory fragmentation ratio ($\text{used\_memory\_rss} / \text{used\_memory}$) ex
 
 ---
 
-### Question 23: When is an SQL index better than a cache?
+### Question 23: When is an SQL index better than a cache, and what dictates its latency?
 **Model Answer:**
-An SQL index is superior when the dataset changes frequently or when data consistency is critical. A proper B-Tree index lookup takes $O(\log N)$ time (typically 1–3ms) directly from the database buffer pool (`shared_buffers`) without any cache-invalidation race conditions, network serialization overhead, or memory duplication costs. Caching should only be layered on top if the indexed query still consumes excessive CPU (e.g. complex aggregations) or if query volume exceeds database connection pool capacity.
+An SQL index is superior when the dataset changes frequently or when strict transactional consistency is required. A proper B-Tree index lookup eliminates cache-invalidation race conditions, network serialization overhead, and memory duplication costs.
+**Workload-Dependent Latency:** While B-Tree index lookup complexity is $O(\log N)$ comparisons, physical execution latency is strictly workload-dependent:
+- If active index and table pages reside in memory (PostgreSQL `shared_buffers` or InnoDB Buffer Pool) and the query is an index-only scan, execution takes **sub-millisecond** time directly in RAM.
+- If pages must be read from NVMe/SSD disk (cold cache / buffer eviction), or if table heap fetches incur random I/O, or if lock contention and index bloat are present, latency climbs to **5–50ms**.
+Caching should only be layered on top if the indexed query still consumes excessive CPU (e.g. complex multi-table aggregations) or if query volume exceeds database connection pool capacity.
 
 ---
 
@@ -1750,15 +1886,18 @@ The `Vary` header instructs HTTP caches (browsers, CDNs) that a cached response 
 **Model Answer:**
 1. **Edge Shielding:** Static sale pages and product descriptions are cached at Cloudflare CDN (`public, max-age=60`).
 2. **In-Memory Pre-Allocation:** Pre-load the exact inventory count into a Redis integer key (`stock = 100`).
-3. **Atomic Lua Rate Limiting & Decrement:** Users clicking "Buy" execute an atomic Redis Lua script:
+3. **Atomic Lua Rate Limiting & Guarded Decrement:** Users clicking "Buy" execute an atomic Redis Lua script that guards against decrements below zero:
 ```lua
-if redis.call('decr', KEYS[1]) >= 0 then
-    return 1 -- Winner
+local stock = tonumber(redis.call('get', KEYS[1]) or '0')
+if stock >= 1 then
+    redis.call('decr', KEYS[1])
+    return 1 -- Reserved
 else
-    return 0 -- Sold out
+    return 0 -- Sold out (does NOT decrement below zero)
 end
 ```
-4. **Asynchronous Queuing:** The 100 winning users are queued via RabbitMQ/Kafka to complete database checkout. The remaining 999,900 requests fail fast at the Redis tier in ~1ms without ever touching the PostgreSQL relational database.
+4. **Asynchronous Queuing & Durability Warning:** The 100 winning users are queued via RabbitMQ/Kafka to complete database checkout. The remaining 999,900 requests fail fast at the Redis tier in ~1ms without touching PostgreSQL.
+**Critical Reliability Warning:** A Redis decrement is **not** a durable reservation and does not guarantee atomicity with subsequent database transactions. If an application pod crashes after the Redis decrement but before creating the database order, that inventory slot becomes stranded/lost. Production systems must implement durable reservation leases with expiration timestamps, compensating rollbacks on DB failure, and background reconciliation workers.
 
 ---
 
@@ -1787,7 +1926,7 @@ end
 | :--- | :--- | :--- | :---: | :--- | :--- |
 | **Cache-Aside** | App reads Cache; on miss, reads DB, populates Cache. | App writes DB, then deletes (`DEL`) Cache. | **Zero** | Eventual | General REST APIs, mixed read/write workloads. |
 | **Read-Through** | App reads Cache library; library loads DB on miss. | Paired with Write-Through / Write-Behind. | **Zero** | Eventual | Standard ORM / Repository abstraction layers. |
-| **Write-Through** | Same as Read-Through. | App writes Cache; Cache synchronously writes DB. | **Zero** | High | Read-immediately-after-write entities. |
+| **Write-Through** | Same as Read-Through. | App writes Cache; Cache synchronously writes DB. | **Zero** | High (No cross-system 2PC atomicity) | Read-immediately-after-write entities. |
 | **Write-Behind** | Same as Read-Through. | App writes Cache; Cache flushes DB asynchronously. | **High** | Eventual | High-throughput telemetry, metrics, gaming counters. |
 | **Refresh-Ahead** | App reads Cache; Cache auto-refreshes hot expiring keys. | Decoupled (Cache-Aside / Write-Through). | **Zero** | High | Known hot items where miss latency is unacceptable. |
 
@@ -1820,36 +1959,43 @@ REDIS DATA STRUCTURE SELECTION
 
 | Anomaly | Root Cause | Primary Symptom | Defensive Solutions |
 | :--- | :--- | :--- | :--- |
-| **Cache Stampede** | Single hot key expires under high concurrency. | Database CPU spikes to 100% on a single entity lookup. | 1. Single-Flight request coalescing (`CompletableFuture` / Promises).<br>2. Probabilistic early refresh (XFetch algorithm).<br>3. Mutex locking on miss. |
+| **Cache Stampede** | Single hot key expires under high concurrency. | Database CPU spikes to 100% on a single entity lookup. | 1. Single-Flight request coalescing (in-process / distributed).<br>2. Probabilistic early refresh (XFetch algorithm - reduces risk, but sparse traffic or latency spikes can still miss).<br>3. Mutex locking on miss. |
 | **Cache Avalanche** | Massive number of keys expire at the exact same second. | Broad database saturation across thousands of queries. | 1. **TTL Jitter:** Add random duration: $\text{TTL}_{\text{base}} + \text{random}(0, \text{jitter})$.<br>2. Redis Cluster high availability with read replicas. |
-| **Cache Penetration** | Requests query IDs that do not exist in cache or DB. | Continuous 100% database miss rate returning 404s. | 1. **Negative Caching:** Cache null sentinel with short TTL (30s).<br>2. **Bloom Filter:** Test membership before cache/DB lookup. |
+| **Cache Penetration** | Requests query IDs that do not exist in cache or DB. | Continuous 100% database miss rate returning 404s. | 1. **Negative Caching:** Cache null sentinel with short TTL (30s).<br>2. **Bloom Filter:** Pre-screen membership (authoritative only when fully populated and write-synchronized). |
 | **Hot Key Saturation** | Single key receives extreme traffic exceeding shard CPU/NIC. | One Redis node hits 100% CPU while others sit idle. | 1. Local in-process L1 cache (Caffeine).<br>2. Split key across shards with random suffixes (`key:1..N`). |
 
 ---
 
-### 18.5 HTTP Caching Directives (RFC 9111)
+### 18.5 HTTP Caching Directives (RFC 9111 & RFC 9110)
 
 ```
-Cache-Control: public, max-age=3600, s-maxage=86400, no-cache, no-store
+HTTP CACHE-CONTROL PATTERNS (RFC 9111)
+├── Reusable Public Content   -> Cache-Control: public, max-age=3600, s-maxage=86400, stale-while-revalidate=60
+├── Revalidate Always Content -> Cache-Control: no-cache (May store; MUST revalidate with origin before serving)
+└── Sensitive / Auth Content  -> Cache-Control: no-store, private (MUST NOT store anywhere in RAM or disk)
+
+CORE DIRECTIVES DECODED
 ├── max-age=N                -> Freshness lifetime for browsers in seconds.
 ├── s-maxage=N              -> Freshness lifetime for shared intermediary caches (CDNs) only.
 ├── no-cache                 -> MUST revalidate with origin before serving (DOES NOT MEAN NO STORE!).
-├── no-store                 -> MUST NOT store anywhere (Mandatory for auth, PII, banking).
+├── no-store                 -> MUST NOT store anywhere (RAM or disk, RFC 9111 Sec 5.2.2.5; mandatory for auth/PII).
 ├── public                   -> Any cache (CDN, proxy, browser) may store.
-├── private                  -> Browser cache only; CDNs must NOT store.
+├── private                  -> Browser cache only; shared CDNs must NOT store.
 ├── stale-while-revalidate=N -> Serve stale response immediately while refreshing in background.
-└── ETag: "hash"             -> Revalidate via If-None-Match -> Returns 304 Not Modified.
+├── Strong ETag ("hash")     -> Byte-for-byte binary identity; required for Range / 206 Partial Content.
+└── Weak ETag (W/"hash")     -> Semantic equivalence (RFC 9110); valid for full GET revalidation, forbidden for Range.
 ```
 
 ---
 
 ### 18.6 Common Production Pitfalls to Avoid in Interviews
 
-1. **Updating Cache on DB Write:** Never issue `SET` on write; always issue `DEL` to eliminate write-order race conditions.
+1. **Updating Cache on DB Write:** Prefer `DEL` on write to eliminate write-order race conditions. Note that key deletion alone does not eliminate the read-miss / concurrent write interleave race; version watermarks or generation leases are required for strict serialization.
 2. **Synchronous Keys Command:** Never use `KEYS *` in production; always use non-blocking cursor iteration `SCAN`.
-3. **Caching Before Indexing:** Always optimize SQL queries, fix N+1 queries, and add composite B-Tree indexes before implementing a cache.
+3. **Caching Before Indexing:** Always optimize SQL queries, fix N+1 queries, and add composite B-Tree indexes before implementing a cache. B-Tree lookup latency is workload-dependent (sub-millisecond in buffer cache vs tens of milliseconds on cold disk I/O).
 4. **Uniform TTLs:** Never set identical static TTLs across bulk inserts; always apply pseudo-random TTL jitter.
-5. **Spring Self-Invocation Proxy Trap:** Calling a `@Cacheable` method from within the same class bypasses Spring AOP proxies and skips the cache entirely.
-6. **Fragile Cache Dependencies:** Wrap all cache calls in strict timeouts and try-catch blocks; a dead Redis cluster must never take down your API.
-7. **Rate Limiter Timestamp Collision:** In Redis Sorted Set sliding windows, never use timestamps alone as members; combine `now:requestId` to guarantee uniqueness.
-8. **Lock Release Stalls:** Never release a Redis distributed lock with a bare `DEL`; use a Lua script checking the random owner UUID token to prevent releasing another client's lock.
+5. **Spring Cache Scope & Proxy Trap:** Calling a `@Cacheable` method from within the same class bypasses Spring AOP proxies. Moreover, `@Cacheable(sync = true)` is strictly local to a single JVM instance, not fleet-wide across pods.
+6. **Fragile Cache Dependencies & Fallback Overload:** Wrap all cache calls in strict timeouts with timer cleanup (`clearTimeout` in Node.js) and Circuit Breakers. `Promise.race` does not cancel underlying socket operations, and a cache outage must never unconstrainedly dump 100% of read traffic onto the relational database.
+7. **Rate Limiter Pitfalls:** In fixed-window limiters, avoid naive `INCR` + `EXPIRE` crash windows by using atomic Lua scripts. In Redis Sorted Set sliding windows, combine `now:requestId` to guarantee uniqueness.
+8. **Lock Release Stalls & Fencing Tokens:** Never release a Redis distributed lock with a bare `DEL`; use a Lua script checking the owner UUID token. Remember that Redis locks do not issue monotonic fencing tokens; tokens must be generated explicitly and enforced by the downstream storage system.
+9. **Unguarded Flash-Sale Decrement:** Never decrement inventory below zero on rejection. Always guard decrements in Lua, and implement durable reservation leases and reconciliation, because an in-memory Redis decrement is not a durable transaction.

@@ -329,21 +329,15 @@ def check_ledger_status(ledger_path: Path) -> tuple[bool, str]:
     if not mod5_approved:
         return False, "Module 5 must be marked 'USER APPROVED' reflecting explicit human authorization."
 
-    # Verify Module 6 is recorded as READY FOR USER REVIEW
-    mod6_ready = False
-    for line in lines:
-        if "module_06_api_engineering_security.md" in line or "**06**" in line:
-            if "READY FOR USER REVIEW" in line:
-                mod6_ready = True
-                break
-    if not mod6_ready:
-        return False, "Module 6 must be recorded as 'READY FOR USER REVIEW'."
-
-    # Ensure Module 6 is NOT marked USER APPROVED prematurely
+    # Verify Module 6 is recorded as USER APPROVED
+    mod6_approved = False
     for line in lines:
         if "module_06_api_engineering_security.md" in line or "**06**" in line:
             if "USER APPROVED" in line:
-                return False, "VIOLATION: Module 6 is marked 'USER APPROVED' in the ledger! Only human users may grant approval."
+                mod6_approved = True
+                break
+    if not mod6_approved:
+        return False, "Module 6 must be marked 'USER APPROVED' reflecting explicit human authorization."
 
     # Verify Module 7 is recorded as READY FOR USER REVIEW
     mod7_ready = False
@@ -361,7 +355,7 @@ def check_ledger_status(ledger_path: Path) -> tuple[bool, str]:
             if "USER APPROVED" in line:
                 return False, "VIOLATION: Module 7 is marked 'USER APPROVED' in the ledger! Only human users may grant approval."
 
-    return True, "Quality ledger correctly tracks Modules 1-5 (USER APPROVED) and Modules 6-7 (READY FOR USER REVIEW)"
+    return True, "Quality ledger correctly tracks Modules 1-6 (USER APPROVED) and Module 7 (READY FOR USER REVIEW)"
 
 def main() -> int:
     repo_root = Path(__file__).resolve().parent.parent

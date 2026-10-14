@@ -140,25 +140,34 @@ def test_single_flight_coalescing():
     def single_flight_execute(key: str) -> str:
         with lock:
             if key in in_flight:
-                event, result_box = in_flight[key]
+                event, result_box, my_id = in_flight[key]
                 need_execute = False
             else:
                 event = threading.Event()
-                result_box = [None]
-                in_flight[key] = (event, result_box)
+                result_box = [None, None] # [result, exception]
+                my_id = object()
+                in_flight[key] = (event, result_box, my_id)
                 need_execute = True
 
         if need_execute:
             try:
                 res = expensive_db_query(key)
                 result_box[0] = res
+            except Exception as e:
+                result_box[1] = e
+                raise
             finally:
                 with lock:
-                    in_flight.pop(key, None)
+                    # Clean up ONLY if this exact registration is still present
+                    current = in_flight.get(key)
+                    if current and current[2] is my_id:
+                        in_flight.pop(key, None)
                 event.set()
             return res
         else:
             event.wait()
+            if result_box[1] is not None:
+                raise result_box[1]
             return result_box[0]
 
     concurrency = 20
@@ -173,7 +182,53 @@ def test_single_flight_coalescing():
         assert r == "RESULT_FOR_hot_item_key"
 
     assert db_execution_count == 1, f"Expected 1 DB execution, observed {db_execution_count}"
-    print(f"    -> Passed: {concurrency} concurrent threads collapsed into exactly 1 database execution.")
+    assert len(in_flight) == 0, "In-flight registry must be empty after completion"
+
+    # Verify exception propagation and cleanup
+    def failing_loader(key: str) -> str:
+        raise RuntimeError("Database connection reset")
+
+    def failing_single_flight(key: str) -> str:
+        with lock:
+            if key in in_flight:
+                event, result_box, my_id = in_flight[key]
+                need_execute = False
+            else:
+                event = threading.Event()
+                result_box = [None, None]
+                my_id = object()
+                in_flight[key] = (event, result_box, my_id)
+                need_execute = True
+        if need_execute:
+            try:
+                res = failing_loader(key)
+                result_box[0] = res
+                return res
+            except Exception as e:
+                result_box[1] = e
+                raise
+            finally:
+                with lock:
+                    current = in_flight.get(key)
+                    if current and current[2] is my_id:
+                        in_flight.pop(key, None)
+                event.set()
+        else:
+            event.wait()
+            if result_box[1] is not None:
+                raise result_box[1]
+            return result_box[0]
+
+    caught = False
+    try:
+        failing_single_flight("failing_query")
+    except RuntimeError as re:
+        caught = True
+        assert "Database connection reset" in str(re)
+    assert caught, "Exception must be raised"
+    assert len(in_flight) == 0, "In-flight map must clean up after exception"
+
+    print(f"    -> Passed: {concurrency} threads coalesced into 1 DB query; error cleanup verified.")
 
 def test_redis_zset_rate_limiter_collision():
     print("  [TEST 5] Redis ZSET Sliding-Window Rate Limiter Member Collision Fix...")

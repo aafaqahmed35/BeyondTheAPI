@@ -156,41 +156,125 @@ local function xfetch_probabilistic_refresh()
 end
 
 -- -----------------------------------------------------------------------------
--- 4. Versioned Compare-and-Set Cache Write-Back
+-- 4. Versioned Compare-and-Set Cache Write-Back with Invalidation Watermark
 -- -----------------------------------------------------------------------------
 -- Problem: Invalidation race condition:
 -- 1. Thread A reads Version 1 from DB.
--- 2. Thread B updates DB to Version 2 and evicts cache.
+-- 2. Thread B updates DB to Version 2 and evicts cache key.
 -- 3. Thread A (pre-empted) writes back Version 1, corrupting the cache.
 --
--- Solution: This script compares the new entity version against the currently
--- cached version. The cache is updated ONLY if new_version > existing_version.
+-- CRITICAL ARCHITECTURAL LIMITATION OF NAIVE CAS:
+-- If Thread B calls DEL on the payload key, Redis removes all version metadata.
+-- When delayed Thread A arrives with Version 1, HGET returns nil. A naive CAS
+-- script would treat the absent key as empty and accept stale Version 1!
 --
--- KEYS[1]: Cache key (e.g., 'cache:user:101')
--- ARGV[1]: New payload JSON (string)
+-- DEFENSIBLE STRATEGY: Version Watermark Tombstone
+-- When invalidating, the application or CDC pipeline updates a dedicated version
+-- watermark key (KEYS[2]) to the committed DB version with a short TTL (e.g. 30s).
+-- This script checks BOTH the cached payload version AND the invalidation watermark.
+--
+-- KEYS[1]: Payload cache key (e.g., 'cache:user:101')
+-- KEYS[2]: Version watermark key (e.g., 'cache:user:101:ver')
+-- ARGV[1]: New payload JSON string
 -- ARGV[2]: New version number (integer or timestamp)
--- ARGV[3]: TTL in seconds (integer)
+-- ARGV[3]: Payload TTL in seconds (integer)
 --
 -- Returns: 1 if updated, 0 if rejected as stale
 local function versioned_cache_put()
-    local key = KEYS[1]
+    local payloadKey = KEYS[1]
+    local watermarkKey = KEYS[2]
     local newPayload = ARGV[1]
     local newVersion = tonumber(ARGV[2])
     local ttlSeconds = tonumber(ARGV[3])
 
-    local existingVersionStr = redis.call('HGET', key, '_version')
-    if existingVersionStr then
-        local existingVersion = tonumber(existingVersionStr)
-        if existingVersion and newVersion <= existingVersion then
-            -- Reject stale write: current cache has newer or equal version!
+    -- 1. Check invalidation watermark tombstone
+    local watermarkStr = redis.call('GET', watermarkKey)
+    if watermarkStr then
+        local watermark = tonumber(watermarkStr)
+        if watermark and newVersion < watermark then
+            -- Reject stale write: database was mutated to a newer version than this read!
             return 0
         end
     end
 
-    -- Update hash with payload and version atomically
-    redis.call('HSET', key, '_data', newPayload, '_version', newVersion)
-    redis.call('EXPIRE', key, ttlSeconds)
+    -- 2. Check current payload hash version if present
+    local existingVersionStr = redis.call('HGET', payloadKey, '_version')
+    if existingVersionStr then
+        local existingVersion = tonumber(existingVersionStr)
+        if existingVersion and newVersion <= existingVersion then
+            -- Reject stale write: cache already holds an equal or newer version
+            return 0
+        end
+    end
+
+    -- 3. Atomically write payload and version
+    redis.call('HSET', payloadKey, '_data', newPayload, '_version', newVersion)
+    redis.call('EXPIRE', payloadKey, ttlSeconds)
     return 1
+end
+
+-- -----------------------------------------------------------------------------
+-- 5. Flash-Sale Atomic Inventory Reservation (Guarded Non-Negative Decrement)
+-- -----------------------------------------------------------------------------
+-- Problem: Unconditional DECR decrements inventory below zero on high traffic
+-- (e.g. 50,000 requests push stock to -49,900, corrupting replenishment logic).
+--
+-- CRITICAL RELIABILITY & DURABILITY WARNING:
+-- An in-memory Redis decrement is NOT a durable database reservation!
+-- It does NOT guarantee atomicity with relational database writes or message
+-- publication. If the application crashes, network fails, or payment is abandoned
+-- before the database order is committed, that inventory unit is LEAKED (lost).
+-- Production systems must implement:
+--   a) Short-lived reservation tokens with expiry.
+--   b) Periodic background reconciliation jobs (Redis vs PostgreSQL).
+--   c) Compensating increment scripts on checkout cancellation.
+--
+-- KEYS[1]: Inventory counter key (e.g., 'inventory:stock:item_42')
+-- ARGV[1]: Quantity to reserve (positive integer, e.g., 1)
+--
+-- Returns: 1 if successfully reserved, 0 if sold out / insufficient stock
+local function flash_sale_inventory_reservation()
+    local stockKey = KEYS[1]
+    local requestedQty = tonumber(ARGV[1]) or 1
+
+    local currentStock = tonumber(redis.call('GET', stockKey) or 0)
+    if currentStock < requestedQty then
+        return 0 -- Insufficient stock; do NOT decrement below zero!
+    end
+
+    redis.call('DECRBY', stockKey, requestedQty)
+    return 1 -- Successfully reserved in memory
+end
+
+-- -----------------------------------------------------------------------------
+-- 6. Atomic Fixed-Window Rate Limiter (Crash-Safe Expiry Initialization)
+-- -----------------------------------------------------------------------------
+-- Problem: In naive fixed-window, if the client issues INCR and crashes before
+-- issuing EXPIRE, the key permanently lives in Redis with NO TTL, blocking the user forever.
+--
+-- Solution: This script executes INCR and atomically sets the TTL on the first
+-- request (when count == 1), guaranteeing that the key will always expire.
+--
+-- KEYS[1]: Counter key (e.g., 'rate_limit:fixed:user_99:window_32')
+-- ARGV[1]: Limit threshold (number)
+-- ARGV[2]: Window duration in seconds (number)
+--
+-- Returns: table {allowed (1 or 0), current_count}
+local function atomic_fixed_window_rate_limiter()
+    local key = KEYS[1]
+    local limit = tonumber(ARGV[1])
+    local windowSec = tonumber(ARGV[2])
+
+    local current = redis.call('INCR', key)
+    if current == 1 then
+        redis.call('EXPIRE', key, windowSec)
+    end
+
+    if current <= limit then
+        return {1, current}
+    else
+        return {0, current}
+    end
 end
 
 -- -----------------------------------------------------------------------------
@@ -204,5 +288,7 @@ return {
     sliding_window_rate_limiter = sliding_window_rate_limiter,
     safe_distributed_lock_release = safe_distributed_lock_release,
     xfetch_probabilistic_refresh = xfetch_probabilistic_refresh,
-    versioned_cache_put = versioned_cache_put
+    versioned_cache_put = versioned_cache_put,
+    flash_sale_inventory_reservation = flash_sale_inventory_reservation,
+    atomic_fixed_window_rate_limiter = atomic_fixed_window_rate_limiter
 }

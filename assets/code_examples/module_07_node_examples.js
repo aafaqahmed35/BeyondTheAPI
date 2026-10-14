@@ -181,27 +181,40 @@ class SingleFlightCoalescer {
     this.inFlight = new Map();
   }
 
-  async execute(key, asyncLoader) {
+  execute(key, loader) {
     const existing = this.inFlight.get(key);
     if (existing) {
       return existing; // Return shared in-flight Promise!
     }
 
-    const promise = (async () => {
-      try {
-        return await asyncLoader(key);
-      } finally {
+    let promise;
+    try {
+      // Promise.resolve().then(...) traps both synchronous throws and async rejections
+      const execution = Promise.resolve().then(() => loader(key));
+      promise = execution.finally(() => {
+        // Invariant: ONLY delete if the map still holds THIS exact in-flight promise instance!
+        // Prevents an earlier promise from deleting a newer promise registered for the same key.
+        if (this.inFlight.get(key) === promise) {
+          this.inFlight.delete(key);
+        }
+      });
+      this.inFlight.set(key, promise);
+      return promise;
+    } catch (syncErr) {
+      if (this.inFlight.get(key) === promise) {
         this.inFlight.delete(key);
       }
-    })();
+      throw syncErr;
+    }
+  }
 
-    this.inFlight.set(key, promise);
-    return promise;
+  inFlightCount() {
+    return this.inFlight.size;
   }
 }
 
 async function testSingleFlightCoalescing() {
-  console.log('  [TEST 3] Single-Flight Request Coalescing under Concurrent Misses...');
+  console.log('  [TEST 3] Single-Flight Request Coalescing under Concurrent Misses & Failures...');
   const coalescer = new SingleFlightCoalescer();
   let dbExecutions = 0;
 
@@ -211,7 +224,7 @@ async function testSingleFlightCoalescing() {
     return `AGGREGATED_METRICS_FOR_${key}`;
   };
 
-  // Launch 15 simultaneous concurrent requests for the SAME missing key
+  // Sub-test A: Launch 15 simultaneous concurrent requests for the SAME missing key
   const concurrency = 15;
   const tasks = Array.from({ length: concurrency }, () =>
     coalescer.execute('dashboard:global_kpis', expensiveDbLoader)
@@ -226,8 +239,44 @@ async function testSingleFlightCoalescing() {
 
   // Verification: Database was invoked only ONCE for all 15 requests
   assert.equal(dbExecutions, 1, '15 concurrent requests must coalesce into exactly 1 DB execution!');
+  assert.equal(coalescer.inFlightCount(), 0, 'In-flight map must be empty after completion');
 
-  console.log('    -> Passed: 15 concurrent misses coalesced into exactly 1 database query.');
+  // Sub-test B: Synchronous loader failure cleanup
+  let syncFailed = false;
+  try {
+    await coalescer.execute('sync_fail_key', () => {
+      throw new Error('Sync database connection failed');
+    });
+  } catch (err) {
+    syncFailed = true;
+    assert.match(err.message, /Sync database connection failed/);
+  }
+  assert.equal(syncFailed, true, 'Synchronous exception must be propagated');
+  assert.equal(coalescer.inFlightCount(), 0, 'In-flight entry must be cleaned up on synchronous failure');
+
+  // Verify key can be retried immediately after failure
+  const retrySyncResult = await coalescer.execute('sync_fail_key', async () => 'RECOVERED_SYNC');
+  assert.equal(retrySyncResult, 'RECOVERED_SYNC');
+
+  // Sub-test C: Asynchronous loader rejection cleanup
+  let asyncFailed = false;
+  try {
+    await coalescer.execute('async_fail_key', async () => {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      throw new Error('Async network timeout');
+    });
+  } catch (err) {
+    asyncFailed = true;
+    assert.match(err.message, /Async network timeout/);
+  }
+  assert.equal(asyncFailed, true, 'Asynchronous rejection must be propagated');
+  assert.equal(coalescer.inFlightCount(), 0, 'In-flight entry must be cleaned up on async rejection');
+
+  // Verify key can be retried immediately after async failure
+  const retryAsyncResult = await coalescer.execute('async_fail_key', async () => 'RECOVERED_ASYNC');
+  assert.equal(retryAsyncResult, 'RECOVERED_ASYNC');
+
+  console.log('    -> Passed: Coalesced 15 concurrent misses, verified sync throw & async rejection cleanup.');
 }
 
 // =========================================================================
@@ -281,18 +330,49 @@ async function testNegativeCaching() {
 // 5. Timeout & Graceful Degradation on Cache Outage
 // =========================================================================
 
+/**
+ * Resilient timeout helper that cancels the pending timer handle upon resolution.
+ *
+ * CRITICAL ARCHITECTURAL WARNING:
+ * 1. Promise.race() does NOT abort or cancel the underlying asynchronous operation!
+ *    In V8/Node.js, background socket operations continue executing to completion
+ *    unless an explicit AbortSignal / socket.destroy() cancels the transport.
+ * 2. Fallback Overload Hazard: Naive fallback from a failing cache to a relational
+ *    database will crush connection pools under high QPS. A production system must
+ *    layer a Circuit Breaker (fail-fast / load shedding) before database fallback.
+ */
+function withTimeout(promise, timeoutMs) {
+  let timerId;
+  const timeoutPromise = new Promise((_, reject) => {
+    timerId = setTimeout(() => {
+      reject(new Error(`ETIMEDOUT: Cache read deadline of ${timeoutMs}ms exceeded`));
+    }, timeoutMs);
+  });
+
+  return Promise.race([promise, timeoutPromise]).finally(() => {
+    // Prevent event loop timer leaks
+    clearTimeout(timerId);
+  });
+}
+
 class FaultyCacheClient {
   constructor(shouldTimeout = false) {
     this.shouldTimeout = shouldTimeout;
+    this.inFlightOperations = 0;
   }
 
-  async get(key, timeoutMs = 50) {
-    if (this.shouldTimeout) {
-      return new Promise((_, reject) =>
-        setTimeout(() => reject(new Error('ETIMEDOUT: Redis connection hung')), timeoutMs + 10)
-      );
+  async get(key, delayMs = 50) {
+    this.inFlightOperations++;
+    try {
+      if (this.shouldTimeout) {
+        return await new Promise((_, reject) =>
+          setTimeout(() => reject(new Error('ETIMEDOUT: Redis socket stalled')), delayMs)
+        );
+      }
+      return null;
+    } finally {
+      this.inFlightOperations--;
     }
-    return null;
   }
 }
 
@@ -301,21 +381,17 @@ async function testGracefulCacheDegradation() {
   const db = new MockDatabase();
   await db.save('item_secure', { secret: 'alpha_omega' });
 
-  const faultyCache = new FaultyCacheClient(true); // Always times out
+  const faultyCache = new FaultyCacheClient(true); // Simulates network hang
   let cacheErrorsLogged = 0;
 
   async function resilientFetch(id) {
-    // Defensive wrapper: Cache failure must NEVER crash or block the request indefinitely!
     let cached = null;
     try {
-      // Race cache against a strict 20ms timeout
-      const timeoutPromise = new Promise((_, reject) =>
-        setTimeout(() => reject(new Error('Cache read deadline exceeded')), 20)
-      );
-      cached = await Promise.race([faultyCache.get(id), timeoutPromise]);
+      // Race cache against a strict 20ms timeout with automatic timer cleanup
+      cached = await withTimeout(faultyCache.get(id, 80), 20);
     } catch (err) {
       cacheErrorsLogged++;
-      // Fallback seamlessly to database!
+      // In production: check circuit breaker before falling back to database
     }
 
     if (cached !== null) return cached;
@@ -323,11 +399,15 @@ async function testGracefulCacheDegradation() {
   }
 
   const result = await resilientFetch('item_secure');
-  assert.equal(result.secret, 'alpha_omega', 'Must return valid DB data despite cache crash');
-  assert.equal(cacheErrorsLogged, 1, 'Cache timeout was trapped and logged');
-  assert.equal(db.reads, 1, 'Database successfully served traffic when cache failed');
+  assert.equal(result.secret, 'alpha_omega', 'Must return valid DB data despite cache hang');
+  assert.equal(cacheErrorsLogged, 1, 'Cache timeout was trapped, logged, and timer cleaned up');
+  assert.equal(db.reads, 1, 'Database successfully served traffic when cache timed out');
 
-  console.log('    -> Passed: Cache timeout safely handled with zero user-facing errors.');
+  // Wait briefly to observe that background promise completes without crashing event loop
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.equal(faultyCache.inFlightOperations, 0, 'Background operation eventually settled');
+
+  console.log('    -> Passed: Cache timeout safely handled with timer cleanup and DB fallback.');
 }
 
 // =========================================================================

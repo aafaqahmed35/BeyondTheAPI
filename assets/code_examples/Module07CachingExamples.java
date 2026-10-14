@@ -319,16 +319,43 @@ public class Module07CachingExamples {
         private final ConcurrentMap<K, CompletableFuture<V>> inFlight = new ConcurrentHashMap<>();
 
         public V execute(K key, Function<K, V> loader) throws ExecutionException, InterruptedException {
-            CompletableFuture<V> future = inFlight.computeIfAbsent(key, k -> CompletableFuture.supplyAsync(() -> {
-                try {
-                    return loader.apply(k);
-                } finally {
-                    // Remove from in-flight once complete so subsequent queries can refresh
-                    inFlight.remove(k);
+            while (true) {
+                CompletableFuture<V> existing = inFlight.get(key);
+                if (existing != null) {
+                    try {
+                        return existing.get();
+                    } catch (CancellationException | ExecutionException e) {
+                        // Stale failure: remove only this exact failed future instance and loop to retry
+                        inFlight.remove(key, existing);
+                        continue;
+                    }
                 }
-            }));
 
-            return future.get();
+                CompletableFuture<V> newFuture = new CompletableFuture<>();
+                CompletableFuture<V> previous = inFlight.putIfAbsent(key, newFuture);
+                if (previous != null) {
+                    // Lost registration race; join the winner's in-flight execution
+                    try {
+                        return previous.get();
+                    } catch (CancellationException | ExecutionException e) {
+                        inFlight.remove(key, previous);
+                        continue;
+                    }
+                }
+
+                // Won registration: execute loader synchronously on this thread
+                try {
+                    V result = loader.apply(key);
+                    newFuture.complete(result);
+                    return result;
+                } catch (Throwable t) {
+                    newFuture.completeExceptionally(t);
+                    throw new ExecutionException("Loader failed in single-flight execution", t);
+                } finally {
+                    // Crucial: 2-argument CAS remove ensures we only remove THIS exact future
+                    inFlight.remove(key, newFuture);
+                }
+            }
         }
 
         public int inFlightCount() {
@@ -351,7 +378,7 @@ public class Module07CachingExamples {
             return "COMPUTED_DATA_FOR_" + key;
         };
 
-        // Launch 20 concurrent threads for the EXACT SAME hot missing key
+        // Sub-test A: Launch 20 concurrent threads for the EXACT SAME hot missing key
         int concurrency = 20;
         ExecutorService pool = Executors.newFixedThreadPool(concurrency);
         CountDownLatch startLatch = new CountDownLatch(1);
@@ -384,8 +411,26 @@ public class Module07CachingExamples {
 
         // The critical invariant: Despite 20 concurrent threads, the database was called EXACTLY ONCE!
         assert expensiveDbCalls.get() == 1 : "Single-flight coalescing must collapse 20 requests into 1 DB query! Found: " + expensiveDbCalls.get();
+        assert coordinator.inFlightCount() == 0 : "In-flight map must be empty after completion";
 
-        System.out.println("    -> Passed: 20 concurrent cache-miss requests coalesced into exactly 1 database execution.");
+        // Sub-test B: Exceptional completion cleanup & retry verification
+        boolean threw = false;
+        try {
+            coordinator.execute("failing_key", k -> {
+                throw new IllegalStateException("Database query timeout");
+            });
+        } catch (ExecutionException e) {
+            threw = true;
+            assert e.getCause() instanceof IllegalStateException;
+        }
+        assert threw : "Loader exception must be propagated to caller";
+        assert coordinator.inFlightCount() == 0 : "In-flight map must clean up on exceptional completion";
+
+        // Verification: Subsequent execution succeeds without being blocked by previous failure
+        String retryResult = coordinator.execute("failing_key", k -> "RECOVERED_VALUE");
+        assert "RECOVERED_VALUE".equals(retryResult);
+
+        System.out.println("    -> Passed: 20 concurrent misses coalesced into 1 DB query; exceptional cleanup verified.");
     }
 
     // =========================================================================
@@ -405,23 +450,41 @@ public class Module07CachingExamples {
     }
 
     public static class VersionedCache {
-        private final Map<String, VersionedEntity> store = new ConcurrentHashMap<>();
+        private final ConcurrentMap<String, VersionedEntity> store = new ConcurrentHashMap<>();
+        // Watermark tracking: Solves the deleted-key CAS race where an empty cache key
+        // would otherwise accept stale writes because previous version metadata was deleted!
+        private final ConcurrentMap<String, Long> versionWatermarks = new ConcurrentHashMap<>();
 
         public VersionedEntity get(String id) {
             return store.get(id);
         }
 
-        public void putIfNewer(VersionedEntity newEntity) {
-            store.compute(newEntity.id, (k, existing) -> {
-                if (existing == null || newEntity.version > existing.version) {
-                    return newEntity;
+        public boolean putIfNewer(VersionedEntity newEntity) {
+            // Check tombstone watermark: reject any read whose version is strictly older than the invalidation watermark!
+            Long watermark = versionWatermarks.get(newEntity.id);
+            if (watermark != null && newEntity.version < watermark) {
+                // Reject stale write: database was already updated to a newer version than this read!
+                return false;
+            }
+
+            VersionedEntity updated = store.compute(newEntity.id, (k, existing) -> {
+                if (existing != null && newEntity.version <= existing.version) {
+                    return existing; // Reject older or duplicate write
                 }
-                // Reject stale write from out-of-order race!
-                return existing;
+                return newEntity;
             });
+
+            return updated == newEntity;
         }
 
-        public void evict(String id) {
+        /**
+         * Evicts cached payload while recording a monotonic version watermark tombstone.
+         * This prevents a delayed read miss from repopulating the evicted key with old data.
+         */
+        public void evictWithWatermark(String id, long committedDbVersion) {
+            versionWatermarks.compute(id, (k, existing) ->
+                existing == null ? committedDbVersion : Math.max(existing, committedDbVersion)
+            );
             store.remove(id);
         }
     }
@@ -434,22 +497,27 @@ public class Module07CachingExamples {
         // 1. Thread A reads Version 1 from DB (slow / delayed write-back to cache).
         VersionedEntity entityV1 = new VersionedEntity("user_99", "email: alice_old@example.com", 1L);
 
-        // 2. Thread B updates DB to Version 2 and evicts cache.
+        // 2. Thread B updates DB to Version 2 and evicts cache with version watermark tombstone.
         VersionedEntity entityV2 = new VersionedEntity("user_99", "email: alice_new@example.com", 2L);
-        cache.evict("user_99");
-        cache.putIfNewer(entityV2); // Thread B populates V2
+        cache.evictWithWatermark("user_99", 2L);
 
+        // Verify key is empty in cache
+        assert cache.get("user_99") == null : "Payload must be evicted from cache";
+
+        // 3. Thread A (delayed) attempts to write back its stale Version 1 into the EMPTY cache!
+        // In naive CAS, this write succeeds because key is absent.
+        // With watermark tombstones, the stale write is safely REJECTED!
+        boolean v1Accepted = cache.putIfNewer(entityV1);
+        assert !v1Accepted : "Stale V1 write must be rejected by version watermark even when cache is empty!";
+        assert cache.get("user_99") == null : "Cache must not hold stale V1 data";
+
+        // 4. Thread B or future read puts fresh Version 2
+        boolean v2Accepted = cache.putIfNewer(entityV2);
+        assert v2Accepted : "Fresh V2 write must be accepted";
         assert cache.get("user_99").version == 2L;
+        assert cache.get("user_99").data.contains("alice_new");
 
-        // 3. Thread A (delayed) attempts to write back its stale Version 1!
-        cache.putIfNewer(entityV1);
-
-        // Invariant: Versioned cache must reject V1 and retain V2!
-        VersionedEntity current = cache.get("user_99");
-        assert current.version == 2L : "Stale V1 write must be rejected by version check!";
-        assert current.data.contains("alice_new") : "Cache must maintain latest data";
-
-        System.out.println("    -> Passed: Versioned compare-and-set rejected delayed stale cache write.");
+        System.out.println("    -> Passed: Version watermark tombstone rejected stale write into evicted cache key.");
     }
 
     // =========================================================================
