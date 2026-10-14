@@ -23,8 +23,8 @@ This central ledger records the technical quality, code verification, completene
 | **04** | **Database Engineering and SQL** | `modules/module_04_database_engineering.md` | 16 / 16 | Verified (8/8 test suites passed in SQLite3 & Standard SQL) | Passed (`scripts/validate_handbook.py`) | `reviews/module_04_qa.md` | **USER APPROVED** | 2026-10-14 (Explicit User Approval) |
 | **05** | **Backend Frameworks & Application Engineering** | `modules/module_05_backend_frameworks.md` | 16 / 16 | Verified (11/11 test suites passed in JDK 21 & Node v24) | Passed (`scripts/validate_handbook.py`) | `reviews/module_05_qa.md` | **USER APPROVED** | 2026-10-14 (Explicit User Approval) |
 | **06** | **API Engineering and Security** | `modules/module_06_api_engineering_security.md` | 16 / 16 | Verified (12/12 test suites passed in JDK 21 & Node v24) | Passed (`scripts/validate_handbook.py`) | `reviews/module_06_qa.md` | **USER APPROVED** | 2026-10-14 (Explicit User Approval) |
-| **07** | **Caching and Performance** | `modules/module_07_caching_performance.md` | 18 / 18 | Verified (17/17 test suites passed in JDK 21, Node v24, Python 3) | Passed (`scripts/validate_handbook.py`) | `reviews/module_07_qa.md` | **READY FOR USER REVIEW** | Pending User Review |
-| **08** | Asynchronous Processing and Distributed Messaging | `modules/module_08_async_messaging.md` | TBD | Pending | Pending | Pending | `NOT STARTED` | Pending |
+| **07** | **Caching and Performance** | `modules/module_07_caching_performance.md` | 18 / 18 | Verified (17/17 test suites passed in JDK 21, Node v24, Python 3) | Passed (`scripts/validate_handbook.py`) | `reviews/module_07_qa.md` | **USER APPROVED** | 2026-10-14 (Explicit User Approval) |
+| **08** | **Asynchronous Processing and Distributed Messaging** | `modules/module_08_async_processing_messaging.md` | 22 / 22 | Verified (17/17 test suites passed in JDK 21, Node v24, Python 3) | Passed (`scripts/validate_handbook.py`) | `reviews/module_08_qa.md` | **READY FOR USER REVIEW** | Pending User Review |
 | **09** | Concurrency and Distributed Systems | `modules/module_09_concurrency_dist.md` | TBD | Pending | Pending | Pending | `NOT STARTED` | Pending |
 | **10** | System Design and Production Architecture | `modules/module_10_system_design.md` | TBD | Pending | Pending | Pending | `NOT STARTED` | Pending |
 | **11** | Observability and Production Diagnostics | `modules/module_11_observability.md` | TBD | Pending | Pending | Pending | `NOT STARTED` | Pending |
@@ -265,8 +265,48 @@ This central ledger records the technical quality, code verification, completene
   17. Interview Question Bank — *Completed*
   18. Module 7 Cheatsheet: Caching & Performance — *Completed*
 - **Code Verification:** Standalone verification harnesses in `assets/code_examples/Module07CachingExamples.java` (7 test suites, OpenJDK 21 LTS), `assets/code_examples/module_07_node_examples.js` (5 test suites, Node.js), `scripts/test_module_07_cache.py` (5 test suites, Python 3), and production reference scripts in `assets/code_examples/module_07_redis_examples.lua`. All 17 test suites passed.
-- **Current Execution Status:** `READY FOR USER REVIEW`
+- **Current Execution Status:** `USER APPROVED`
+- **Human Approval Date:** 2026-10-14 (Explicit User Approval)
 - **Known Limitations:**
   - Lightweight test harnesses implement cache invariants using pure standard libraries without spinning up multi-container Redis clusters or live CDN edge networks.
   - Asynchronous message streaming deferred to Module 8; distributed consensus to Module 9; system design to Module 10.
-- **External Review Status:** Source Markdown, QA audit report, Java, Node, Python test harnesses, and Redis Lua scripts ready for dispatch to external reviewers.
+- **External Review Status:** Approved by Human Reviewer.
+
+---
+
+## 10. Module 8 Deep-Dive Status Card
+
+- **Module Identifier:** `MOD-08-ASYNC-MSG`
+- **Module Title:** Asynchronous Processing & Distributed Messaging
+- **Authoritative Source File:** [module_08_async_processing_messaging.md](file:///Users/mohammedaafaqahmed/Desktop/BeyondTheApi/modules/module_08_async_processing_messaging.md)
+- **QA Audit File:** [reviews/module_08_qa.md](file:///Users/mohammedaafaqahmed/Desktop/BeyondTheApi/reviews/module_08_qa.md)
+- **Target Frameworks / Runtimes:** OpenJDK 21 LTS, Spring Boot 3.3.x / Spring Kafka / Spring AMQP, Node.js v24.x (v20+ LTS), Express.js, TypeScript 5.x, Python 3, Apache Kafka 3.x, RabbitMQ 3.13+, Redis 7.x Streams, PostgreSQL 16
+- **Section Scope (22 Sections):**
+  1. Synchronous versus Asynchronous Execution — *Completed*
+  2. Message Taxonomies: Jobs, Tasks, Messages, Events, Commands, and EDA — *Completed*
+  3. Distributed Messaging Topologies: Producers, Consumers, Brokers, Queues, Topics, Partitions, and Consumer Groups — *Completed*
+  4. Queueing Fundamentals & Systems Physics: Throughput, Service Time, Queue Depth, Arrival Rate, Backpressure, and Little's Law — *Completed*
+  5. Delivery Semantics & The Myth of Generic Exactly-Once: At-Most-Once, At-Least-Once, and Effectively-Once Processing — *Completed*
+  6. Message Acknowledgments, Leases, and Visibility Timeouts: Crash Windows and Redelivery Invariants — *Completed*
+  7. Idempotent Consumer Design: Deduplication Keys, Durable Uniqueness Constraints, and Concurrent Duplicate Races — *Completed*
+  8. Resilient Failure Handling: Exponential Backoff, Full Jitter, Retry Budgets, and Storm Prevention — *Completed*
+  9. Poison Messages & Dead-Letter Queues (DLQ): Quarantine, Inspection, Controlled Redrive, and Operational Ownership — *Completed*
+  10. Ordering Guarantees & Partition-Key Architecture: Scoped In-Order Delivery, Partition Hashing, Hot Partitions, and Global Ordering Costs — *Completed*
+  11. Apache Kafka Deep Dive: Partitions, Commit Log Mechanics, Offsets, Consumer Groups, Rebalancing, and Replication — *Completed*
+  12. Architectural Comparison: Traditional Message Brokers (RabbitMQ) vs. Event Logs (Kafka) vs. Database-Backed Job Queues — *Completed*
+  13. Redis-Backed Queues & Worker Systems: Lists, Streams (PEL, XACK), Leases, and Recovery Limitations — *Completed*
+  14. The Transactional Outbox Pattern: Dual-Write Hazards, Outbox Table Mechanics, CDC/Polling Relays, and Duplicate Publication Realities — *Completed*
+  15. The Transactional Inbox & Idempotency Storage Patterns: Transaction Boundaries, Deduplication Tables, and Atomic State Transitions — *Completed*
+  16. Advanced Job Patterns: Delayed Jobs, Scheduled Work, Priority Queues, Concurrency Limiting, Rate Limiting, and Graceful Worker Shutdown — *Completed*
+  17. Distributed Workflow Patterns: Orchestration vs. Choreography, Sagas, and Compensating Actions — *Completed*
+  18. Message Bus Observability & Operations: Consumer Lag, Queue Age, Processing Latency, Saturation, and Alerting Thresholds — *Completed*
+  19. Security, Schemas, and Evolution: Schema Registries, Avro/JSON Evolution, Access Controls, Retention, and Replay Safety — *Completed*
+  20. Production Failure Scenarios & System Design Walkthroughs: Payment Workflows, Outbox Relays, Consumer Crash Redrive, and Poison Quarantine — *Completed*
+  21. Scenario-Driven Interview Question Bank — *Completed*
+  22. Module 8 Cheatsheet: Asynchronous Processing & Distributed Messaging — *Completed*
+- **Code Verification:** Standalone verification harnesses in `assets/code_examples/Module08MessagingExamples.java` (7 test suites, OpenJDK 21 LTS), `assets/code_examples/module_08_node_messaging_examples.js` (5 test suites, Node.js), and `scripts/test_module_08_messaging.py` (5 test suites, Python 3). All 17 test suites passed.
+- **Current Execution Status:** `READY FOR USER REVIEW`
+- **Known Limitations:**
+  - Lightweight test harnesses model distributed messaging invariants using standard language runtimes without booting external multi-node Kafka or RabbitMQ clusters.
+  - Concurrency and distributed systems consensus deferred to Module 9; system design to Module 10.
+- **External Review Status:** Source Markdown, QA audit report, Java, Node, and Python test harnesses ready for dispatch to external reviewers.
